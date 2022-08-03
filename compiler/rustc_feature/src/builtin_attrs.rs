@@ -269,6 +269,10 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     // Stable attributes:
     // ==========================================================================
 
+    // auto-parallelization
+    ungated!(parallel_func, Normal, template!(Word), WarnFollowing),
+    ungated!(parallel, Normal, template!(Word), WarnFollowing),
+
     // Conditional compilation:
     ungated!(cfg, Normal, template!(List: "predicate"), DuplicatesOk),
     ungated!(cfg_attr, Normal, template!(List: "predicate, attr1, attr2, ..."), DuplicatesOk),
