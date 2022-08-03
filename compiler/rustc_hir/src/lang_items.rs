@@ -250,6 +250,10 @@ language_item_table! {
 
     Start,                   sym::start,               start_fn,                   Target::Fn,             GenericRequirement::Exact(1);
 
+    ToOnceCallArg1,          sym::to_once_call_arg1,   to_once_call_arg1,          Target::Fn,             GenericRequirement::Exact(3);
+    ToOnceCallArg2,          sym::to_once_call_arg2,   to_once_call_arg2,          Target::Fn,             GenericRequirement::Exact(4);
+    RayonJoin,               sym::rayon_join,          rayon_join,                 Target::Fn,             GenericRequirement::Exact(4);
+
     EhPersonality,           sym::eh_personality,      eh_personality,             Target::Fn,             GenericRequirement::None;
     EhCatchTypeinfo,         sym::eh_catch_typeinfo,   eh_catch_typeinfo,          Target::Static,         GenericRequirement::None;
 

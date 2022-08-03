@@ -88,6 +88,19 @@ pub fn dump_mir<'tcx, F>(
     dump_matched_mir_node(tcx, pass_num, pass_name, disambiguator, body, extra_data);
 }
 
+pub fn dump_mir_unchecked<'tcx, F>(
+    tcx: TyCtxt<'tcx>,
+    pass_num: Option<&dyn Display>,
+    pass_name: &str,
+    disambiguator: &dyn Display,
+    body: &Body<'tcx>,
+    extra_data: F,
+) where
+    F: FnMut(PassWhere, &mut dyn Write) -> io::Result<()>,
+{
+    dump_matched_mir_node(tcx, pass_num, pass_name, disambiguator, body, extra_data);
+}
+
 pub fn dump_enabled<'tcx>(tcx: TyCtxt<'tcx>, pass_name: &str, def_id: DefId) -> bool {
     let Some(ref filters) = tcx.sess.opts.unstable_opts.dump_mir else {
         return false;

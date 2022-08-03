@@ -77,6 +77,7 @@ mod match_branches;
 mod multiple_return_terminators;
 mod normalize_array_len;
 mod nrvo;
+mod parallelization;
 // This pass is public to allow external drivers to perform MIR cleanup
 pub mod remove_false_edges;
 mod remove_noop_landing_pads;
@@ -453,8 +454,9 @@ fn mir_drops_elaborated_and_const_checked<'tcx>(
         body.tainted_by_errors = Some(error_reported);
     }
 
-    run_analysis_to_runtime_passes(tcx, &mut body);
-
+    if tcx.features().parallelization {
+        pm::run_passes(tcx, &mut body, &[&parallelization::Parallelism]);
+    }    run_analysis_to_runtime_passes(tcx, &mut body);
     tcx.alloc_steal_mir(body)
 }
 
