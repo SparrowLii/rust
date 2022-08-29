@@ -348,7 +348,7 @@ pub fn collect_crate_mono_items(
         tcx.sess.time("monomorphization_collector_graph_walk", || {
             par_for_each_in(roots, |root| {
                 let mut recursion_depths = DefIdMap::default();
-                collect_items_rec(
+                collect_items(
                     tcx,
                     dummy_spanned(root),
                     visited,
@@ -401,7 +401,7 @@ fn collect_roots(tcx: TyCtxt<'_>, mode: MonoItemCollectionMode) -> Vec<MonoItem<
         })
         .collect()
 }
-
+/*
 /// Collect all monomorphized items reachable from `starting_point`, and emit a note diagnostic if a
 /// post-monorphization error is encountered during a collection step.
 #[instrument(skip(tcx, visited, recursion_depths, recursion_limit, inlining_map), level = "debug")]
@@ -545,6 +545,142 @@ fn collect_items_rec<'tcx>(
     }
 
     debug!("END collect_items_rec({})", starting_point.node);
+}*/
+
+fn collect_items<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    start_point: Spanned<MonoItem<'tcx>>,
+    visited: MTRef<'_, MTLock<FxHashSet<MonoItem<'tcx>>>>,
+    recursion_depths: &mut DefIdMap<usize>,
+    recursion_limit: Limit,
+    inlining_map: MTRef<'_, MTLock<InliningMap<'tcx>>>,
+) {
+    enum Action<'tcx> {
+        Collect(Spanned<MonoItem<'tcx>>),
+        DepthReset(DefId, usize),
+    }
+    let mut actions: Vec<_> = vec![Action::Collect(start_point)];
+
+    while let Some(action) = actions.pop() {
+        match action {
+            Action::Collect(starting_point) => {
+                let mut neighbors = MonoItems { compute_inlining: true, tcx, items: Vec::new() };
+
+                if !visited.lock_mut().insert(starting_point.node) {
+                    // We've been here already, no need to search again.
+                    continue;
+                }
+                debug!("BEGIN collect_items({})", starting_point.node);
+                let recursion_depth_reset;
+
+                let error_count = tcx.sess.diagnostic().err_count();
+                match starting_point.node {
+                    MonoItem::Static(def_id) => {
+                        let instance = Instance::mono(tcx, def_id);
+
+                        // Sanity check whether this ended up being collected accidentally
+                        debug_assert!(should_codegen_locally(tcx, &instance));
+
+                        let ty = instance.ty(tcx, ty::ParamEnv::reveal_all());
+                        visit_drop_use(tcx, ty, true, starting_point.span, &mut neighbors);
+
+                        recursion_depth_reset = None;
+
+                        if let Ok(alloc) = tcx.eval_static_initializer(def_id) {
+                            for &id in alloc.inner().relocations().values() {
+                                collect_miri(tcx, id, &mut neighbors);
+                            }
+                        }
+                    }
+                    MonoItem::Fn(instance) => {
+                        // Sanity check whether this ended up being collected accidentally
+                        debug_assert!(should_codegen_locally(tcx, &instance));
+
+                        // Keep track of the monomorphization recursion depth
+                        recursion_depth_reset = Some(check_recursion_limit(
+                            tcx,
+                            instance,
+                            starting_point.span,
+                            recursion_depths,
+                            recursion_limit,
+                        ));
+                        check_type_length_limit(tcx, instance);
+
+                        rustc_data_structures::stack::ensure_sufficient_stack(|| {
+                            collect_neighbours(tcx, instance, &mut neighbors);
+                        });
+                    }
+                    MonoItem::GlobalAsm(item_id) => {
+                        recursion_depth_reset = None;
+
+                        let item = tcx.hir().item(item_id);
+                        if let hir::ItemKind::GlobalAsm(asm) = item.kind {
+                            for (op, op_sp) in asm.operands {
+                                match op {
+                                    hir::InlineAsmOperand::Const { .. } => {
+                                        // Only constants which resolve to a plain integer
+                                        // are supported. Therefore the value should not
+                                        // depend on any other items.
+                                    }
+                                    hir::InlineAsmOperand::SymFn { anon_const } => {
+                                        let fn_ty = tcx
+                                            .typeck_body(anon_const.body)
+                                            .node_type(anon_const.hir_id);
+                                        visit_fn_use(tcx, fn_ty, false, *op_sp, &mut neighbors);
+                                    }
+                                    hir::InlineAsmOperand::SymStatic { path: _, def_id } => {
+                                        let instance = Instance::mono(tcx, *def_id);
+                                        if should_codegen_locally(tcx, &instance) {
+                                            trace!("collecting static {:?}", def_id);
+                                            neighbors
+                                                .push(dummy_spanned(MonoItem::Static(*def_id)));
+                                        }
+                                    }
+                                    hir::InlineAsmOperand::In { .. }
+                                    | hir::InlineAsmOperand::Out { .. }
+                                    | hir::InlineAsmOperand::InOut { .. }
+                                    | hir::InlineAsmOperand::SplitInOut { .. } => {
+                                        span_bug!(*op_sp, "invalid operand type for global_asm!")
+                                    }
+                                }
+                            }
+                        } else {
+                            span_bug!(
+                                item.span,
+                                "Mismatch between hir::Item type and MonoItem type"
+                            )
+                        }
+                    }
+                }
+                // Check for PMEs and emit a diagnostic if one happened. To try to show relevant edges of the
+                // mono item graph.
+                if tcx.sess.diagnostic().err_count() > error_count
+                    && starting_point.node.is_generic_fn()
+                    && starting_point.node.is_user_defined()
+                {
+                    let formatted_item = with_no_trimmed_paths!(starting_point.node.to_string());
+                    tcx.sess.span_note_without_error(
+                        starting_point.span,
+                        &format!(
+                            "the above error was encountered while instantiating `{}`",
+                            formatted_item
+                        ),
+                    );
+                }
+
+                inlining_map.lock_mut().record_accesses(starting_point.node, &neighbors.items);
+
+                if let Some((def_id, depth)) = recursion_depth_reset {
+                    actions.push(Action::DepthReset(def_id, depth));
+                }
+
+                actions.extend(neighbors.items.into_iter().rev().map(|(item, _)| Action::Collect(item)));
+            }
+            Action::DepthReset(def_id, depth) => {
+                recursion_depths.insert(def_id, depth);
+            }
+        }
+    }
 }
 
 /// Format instance name that is already known to be too long for rustc.
