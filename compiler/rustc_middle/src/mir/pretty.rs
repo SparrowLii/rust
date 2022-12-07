@@ -90,7 +90,7 @@ pub fn dump_mir<'tcx, F>(
 
 pub fn dump_mir_unchecked<'tcx, F>(
     tcx: TyCtxt<'tcx>,
-    pass_num: Option<&dyn Display>,
+    pass_num: bool,
     pass_name: &str,
     disambiguator: &dyn Display,
     body: &Body<'tcx>,

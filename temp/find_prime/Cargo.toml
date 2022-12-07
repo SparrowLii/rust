@@ -1,0 +1,9 @@
+[package]
+name = "find_prime"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+parallelization_builtins = { version = "0.1.0", path = "../parallelization_builtins"}

@@ -280,7 +280,7 @@ pub(crate) fn compute_regions<'cx, 'tcx>(
     // Dump facts if requested.
     let polonius_output = all_facts.as_ref().and_then(|all_facts| {
         if infcx.tcx.sess.opts.unstable_opts.nll_facts || infcx.tcx.features().parallelization {
-            dump_mir_unchecked(infcx.tcx, None, "pre_parallelization", &0, body, |_, _| Ok(()));
+            dump_mir_unchecked(infcx.tcx, false, "pre_parallelization", &0, body, |_, _| Ok(()));
             let def_path = infcx.tcx.def_path(def_id);
             let dir_path = PathBuf::from(&infcx.tcx.sess.opts.unstable_opts.nll_facts_dir)
                 .join(def_path.to_filename_friendly_no_crate());

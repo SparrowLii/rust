@@ -12,16 +12,17 @@ use rustc_middle::mir::{
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty;
 use rustc_middle::ty::{GenericArg, TyCtxt};
-use rustc_span::{sym, DUMMY_SP};
+use rustc_span::{sym, DUMMY_SP, Symbol};
 
 pub struct Parallelism;
 
 impl<'tcx> MirPass<'tcx> for Parallelism {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+        println!("analysis auto parallelism in: {:?}", tcx.item_name(body.source.instance.def_id()));
         let parallel_result: FxHashMap<((u32, u32), (u32, u32)), bool> =
             find_func_parallel(&body, tcx);
-        println!("parallel_result: {:?}", parallel_result);
-        if parallel_result.len() != 1 {
+        if parallel_result.len() > 1 {
+            println!("unimplemented for more than two auto parallel functions");
             return;
         }
 
@@ -434,48 +435,58 @@ fn find_func_parallel<'tcx>(
 ) -> FxHashMap<((u32, u32), (u32, u32)), bool> {
     let mut func_parallel_table: FxHashMap<((u32, u32), (u32, u32)), bool> = FxHashMap::default();
 
-    let func_calls: Vec<(u32, u32)> = body
-        .basic_blocks()
-        .into_iter()
+    let func_calls: Vec<(u32, u32, Symbol)> = body
+        .basic_blocks
+        .iter()
         .enumerate()
-        .filter(|(_, data)| {
+        .filter_map(|(location, data)| {
             if let TerminatorKind::Call { func, .. } = &data.terminator().kind {
                 if let ty::FnDef(defid, _) = func.ty(body, tcx).kind() {
-                    tcx.get_attr(*defid, sym::parallel_func).is_some()
+                    if tcx.get_attr(*defid, sym::parallel_func).is_some() {
+                        Some((location as u32, data.statements.len() as u32, tcx.item_name(*defid)))
+                    } else {
+                        None
+                    }
                 } else {
-                    false
+                    None
                 }
             } else {
-                false
+                None
             }
         })
-        .map(|(location, date)| (location as u32, date.statements.len() as u32))
         .collect();
 
-    if func_calls.len() == 2 {
-        let (block_id1, stmt_no1) = func_calls[0];
-        let (block_id2, stmt_no2) = func_calls[1];
-        let source = body.source;
-        let item_name = tcx.def_path(source.def_id()).to_filename_friendly_no_crate();
-        let prefix_path = format!("{}/{}/", tcx.sess.opts.unstable_opts.nll_facts_dir, &item_name);
-        let mir_path = format!(
-            "{}/{}.{}.-------.pre_parallelization.0.mir",
-            tcx.sess.opts.unstable_opts.dump_mir_dir,
-            tcx.crate_name(source.def_id().krate),
-            &item_name
-        );
+    for (block_id1, stmt_no1, func1) in func_calls.iter() {
+        for (block_id2, stmt_no2, func2) in func_calls.iter() {
+            if block_id1 < block_id2 {
+                let source = body.source;
+                let item_name = tcx.def_path(source.def_id()).to_filename_friendly_no_crate();
+                let prefix_path = format!("{}/{}/", tcx.sess.opts.unstable_opts.nll_facts_dir, &item_name);
+                let mir_path = format!(
+                    "{}/{}.{}.-------.pre_parallelization.0.mir",
+                    tcx.sess.opts.unstable_opts.dump_mir_dir,
+                    tcx.crate_name(source.def_id().krate),
+                    &item_name
+                );
 
-        func_parallel_table.insert(
-            ((block_id1, stmt_no1), (block_id2, stmt_no2)),
-            whether_two_func_parallel(
-                &prefix_path,
-                &mir_path,
-                block_id1,
-                stmt_no1,
-                block_id2,
-                stmt_no2,
-            ),
-        );
+                let is_parallel = whether_two_func_parallel(
+                    &prefix_path,
+                    &mir_path,
+                    *block_id1,
+                    *stmt_no1,
+                    *block_id2,
+                    *stmt_no2,
+                );
+
+                func_parallel_table.insert(
+                    ((*block_id1, *stmt_no1), (*block_id2, *stmt_no2)), is_parallel,
+                );
+
+                if is_parallel {
+                    println!("{:?}_{:?} with {:?}_{:?} can run in parallel:", block_id1, func1, block_id2, func2);
+                }
+            }
+        }
     }
 
     func_parallel_table

@@ -455,8 +455,9 @@ fn mir_drops_elaborated_and_const_checked<'tcx>(
     }
 
     if tcx.features().parallelization {
-        pm::run_passes(tcx, &mut body, &[&parallelization::Parallelism]);
-    }    run_analysis_to_runtime_passes(tcx, &mut body);
+        pm::run_passes(tcx, &mut body, &[&parallelization::Parallelism], None);
+    }
+    run_analysis_to_runtime_passes(tcx, &mut body);
     tcx.alloc_steal_mir(body)
 }
 
