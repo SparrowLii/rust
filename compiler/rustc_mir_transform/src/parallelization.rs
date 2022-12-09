@@ -443,7 +443,7 @@ fn find_func_parallel<'tcx>(
             if let TerminatorKind::Call { func, .. } = &data.terminator().kind {
                 if let ty::FnDef(defid, _) = func.ty(body, tcx).kind() {
                     if tcx.get_attr(*defid, sym::parallel_func).is_some() {
-                        Some((location as u32, data.statements.len() as u32, tcx.item_name(*defid)))
+                        Some((location as u32, data.statements.len() as u32, tcx.opt_item_name(*defid).unwrap_or(Symbol::intern("unknown_func"))))
                     } else {
                         None
                     }
