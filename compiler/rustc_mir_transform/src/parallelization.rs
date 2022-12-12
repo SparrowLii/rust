@@ -18,7 +18,7 @@ pub struct Parallelism;
 
 impl<'tcx> MirPass<'tcx> for Parallelism {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-        println!("analysis auto parallelism in: {:?}", tcx.item_name(body.source.instance.def_id()));
+        println!("analysis auto parallelism in: {:?}", tcx.opt_item_name(body.source.instance.def_id()).unwrap_or(Symbol::intern("unknown_func")));
         let parallel_result: FxHashMap<((u32, u32), (u32, u32)), bool> =
             find_func_parallel(&body, tcx);
         if parallel_result.len() > 1 {
