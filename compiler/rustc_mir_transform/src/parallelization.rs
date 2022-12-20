@@ -18,23 +18,34 @@ pub struct Parallelism;
 
 impl<'tcx> MirPass<'tcx> for Parallelism {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+        // 输出提示信息
         println!("analysis auto parallelism in: {:?}", tcx.opt_item_name(body.source.instance.def_id()).unwrap_or(Symbol::intern("unknown_func")));
-        let parallel_result: FxHashMap<((u32, u32), (u32, u32)), bool> =
+
+        // 从春淼实现的find_func_parallel方法中获取可以并行(无依赖关系)的函数集合
+        // 其中(u32, u32), (u32, u32))分别是mir中两个可并行的函数在mir中出现的block下标和statement下标，
+        let parallel_result: FxHashSet<((u32, u32), (u32, u32))> =
             find_func_parallel(&body, tcx);
+
+        // 当前版本尚未实现两个以上的函数并行
         if parallel_result.len() > 1 {
             println!("unimplemented for more than two auto parallel functions");
             return;
         }
 
-        for (((loc1, _), (loc2, _)), is_parallel) in parallel_result.iter() {
-            if !is_parallel {
-                continue;
-            }
+        for ((loc1, _sts1), (loc2, _sts2)) in parallel_result.iter() {
+            // 获取两个函数的block下标
             let bb = BasicBlock::from_u32(*loc1);
             let bb2 = BasicBlock::from_u32(*loc2);
+
+            // 获取函数调用处的mir内部数据结构信息
+            // func: 被调用函数
+            // args: 传入参数
+            // destination: 用于存储函数返回值的mir结构
+            // targets: 被调用函数执行完后，当前程序转入该block下标继续运行
             if let TerminatorKind::Call { func, args, destination, target, .. } =
                 body[bb].terminator().kind.clone()
             {
+                // 获取并行的函数调用处的mir内部数据结构信息
                 if let TerminatorKind::Call {
                     func: func2,
                     args: args2,
@@ -43,12 +54,10 @@ impl<'tcx> MirPass<'tcx> for Parallelism {
                     ..
                 } = body[bb2].terminator().kind.clone()
                 {
-                    let loc1 = (bb.as_u32(), body[bb].statements.len() as u32);
-                    let loc2 = (bb2.as_u32(), body[bb2].statements.len() as u32);
-                    if parallel_result.get(&(loc1, loc2)) != Some(&true) {
-                        continue;
-                    }
+                    // 从func中获取被调用函数的def_id和泛型参数，分别放入fn_id和subs本地变量里
                     let (fn_id, subs) = if let ty::FnDef(fn_id, subs) = func.ty(body, tcx).kind() {
+                        // 判断被调用函数是否含有粒度控制标注
+                        // 当前版本只对含有标注的函数进行并行化处理
                         if tcx.get_attr(*fn_id, sym::parallel_func).is_none() {
                             continue;
                         } else {
@@ -58,21 +67,28 @@ impl<'tcx> MirPass<'tcx> for Parallelism {
                     } else {
                         bug!("bad call")
                     };
-                    let (fn_id2, subs2) =
-                        if let ty::FnDef(fn_id, subs2) = func2.ty(body, tcx).kind() {
-                            if tcx.get_attr(*fn_id, sym::parallel_func).is_none() {
-                                continue;
-                            } else {
-                                assert_eq!(subs2.len(), 0);
-                                (*fn_id, *subs2)
-                            }
+
+                    // 从func中获取被第二个函数的def_id和泛型参数，分别放入fn_id和subs本地变量里
+                    let (fn_id2, subs2) = if let ty::FnDef(fn_id, subs2) = func2.ty(body, tcx).kind() {
+                        // 判断被调用函数是否含有粒度控制标注
+                        // 当前版本只对含有标注的函数进行并行化处理
+                        if tcx.get_attr(*fn_id, sym::parallel_func).is_none() {
+                            continue;
                         } else {
-                            bug!("bad call")
-                        };
+                            assert_eq!(subs2.len(), 0);
+                            (*fn_id, *subs2)
+                        }
+                    } else {
+                        bug!("bad call")
+                    };
 
-                    assert_eq!(args.len(), 2);
-                    assert_eq!(args2.len(), 2);
+                    // 当前版本只对含有2个参数的函数做了并行化处理
+                    if args.len() != 2 || args2.len() != 2 {
+                        println!("unimplemented for functions which have non-two arguments");
+                        continue;
+                    }
 
+                    // 为两个并行函数调用的参数分别建立临时变量
                     let args: Vec<_> = args.into_iter().map(|arg| {
                         let ty = arg.ty(body, tcx);
                         let local = body.local_decls.push(LocalDecl::new(ty, DUMMY_SP));
@@ -85,6 +101,8 @@ impl<'tcx> MirPass<'tcx> for Parallelism {
                         });
                         Operand::Move(Place::from(local))
                     }).collect();
+
+                    // 为两个并行函数调用的参数分别建立临时变量
                     let args2: Vec<_> = args2.into_iter().map(|arg| {
                         let ty = arg.ty(body, tcx);
                         let local = body.local_decls.push(LocalDecl::new(ty, DUMMY_SP));
@@ -98,15 +116,19 @@ impl<'tcx> MirPass<'tcx> for Parallelism {
                         Operand::Move(Place::from(local))
                     }).collect();
 
+                    // 分别取出每个函数参数
                     let (arg1_0, arg1_1) = (args[0].ty(body, tcx), args[1].ty(body, tcx));
                     let (arg2_0, arg2_1) = (args2[0].ty(body, tcx), args2[1].ty(body, tcx));
 
+                    // 两个函数的返回值类型
                     let ret_ty1 = destination.ty(body, tcx).ty;
                     let ret_ty2 = destination2.ty(body, tcx).ty;
 
+                    // 为两个函数调用本身建立函数指针临时变量
                     let fn_def1 = tcx.mk_fn_def(fn_id, subs);
                     let fn_def2 = tcx.mk_fn_def(fn_id2, subs2);
 
+                    // 为rayon调用生成第一个被调用函数的泛型列表
                     let to_substs1 = tcx.mk_substs(
                         [
                             GenericArg::from(arg1_0),
@@ -116,6 +138,8 @@ impl<'tcx> MirPass<'tcx> for Parallelism {
                         ]
                         .into_iter(),
                     );
+
+                    // 为rayon调用生成第二个被调用函数的泛型列表
                     let to_substs2 = tcx.mk_substs(
                         [
                             GenericArg::from(arg2_0),
@@ -126,6 +150,7 @@ impl<'tcx> MirPass<'tcx> for Parallelism {
                         .into_iter(),
                     );
 
+                    // 用两个函数指针临时变量生成常量
                     let fn_arg1 = Operand::Constant(Box::new(Constant {
                         span: DUMMY_SP,
                         user_ty: None,
@@ -134,6 +159,8 @@ impl<'tcx> MirPass<'tcx> for Parallelism {
                             fn_def1,
                         ),
                     }));
+
+                    // 用两个函数指针临时变量生成常量
                     let fn_arg2 = Operand::Constant(Box::new(Constant {
                         span: DUMMY_SP,
                         user_ty: None,
@@ -143,12 +170,15 @@ impl<'tcx> MirPass<'tcx> for Parallelism {
                         ),
                     }));
 
+                    // 获取rayon调用参数接口def_id
                     let to_once_call_arg2_id =
                         tcx.require_lang_item(LangItem::ToOnceCallArg2, None);
 
+                    // 获取rayon调用参数接口类型
                     let to_once_call_ty1 = tcx.mk_fn_def(to_once_call_arg2_id, to_substs1);
                     let to_once_call_ty2 = tcx.mk_fn_def(to_once_call_arg2_id, to_substs2);
 
+                    // 生成rayon调用参数接口
                     let to_once_call_func1 = Operand::Constant(Box::new(Constant {
                         span: DUMMY_SP,
                         user_ty: None,
@@ -168,6 +198,7 @@ impl<'tcx> MirPass<'tcx> for Parallelism {
 
                     let des_ty = tcx.fn_sig(to_once_call_arg2_id).skip_binder().output();
 
+                    // 两个rayon调用参数的匿名函数类型
                     let des_ty1 = if let ty::Opaque(id, _sub) = des_ty.kind() {
                         tcx.mk_opaque(*id, to_substs1)
                     } else {
@@ -179,14 +210,17 @@ impl<'tcx> MirPass<'tcx> for Parallelism {
                         bug!("bad des ty: {:?}", des_ty)
                     };
 
+                    // 生成两个rayon调用参数的匿名函数临时变量
                     let once_call_des1 = body.local_decls.push(LocalDecl::new(des_ty1, DUMMY_SP));
                     let once_call_des2 = body.local_decls.push(LocalDecl::new(des_ty2, DUMMY_SP));
 
+                    // 生成两个rayon调用参数的匿名函数临时变量
                     let to_once_call_des1 =
                         Place::from(once_call_des1);
                     let to_once_call_des2 =
                         Place::from(once_call_des2);
 
+                    // 将原本两次函数调用语句变量生成两个匿名函数的语句
                     let once_call_block1 = body.basic_blocks_mut().push(BasicBlockData::new(None));
                     body[bb].terminator_mut().kind = Goto { target: target.unwrap() };
 
@@ -222,6 +256,7 @@ impl<'tcx> MirPass<'tcx> for Parallelism {
                         },
                     });
 
+                    // 将生成的两个匿名函数作为参数传入rayon调用接口
                     let join_call_id = tcx.require_lang_item(LangItem::RayonJoin, None);
                     let join_call_ty = tcx.mk_fn_def(
                         join_call_id,
@@ -315,7 +350,7 @@ impl<'tcx> MirPass<'tcx> for Parallelism {
 //*************************************************************************************************************************
 
 use crepe::crepe;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::FxHashSet;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -432,8 +467,8 @@ crepe! { //----按照原先写的datalog文件，写出下面这些规则
 fn find_func_parallel<'tcx>(
     body: &Body<'tcx>,
     tcx: TyCtxt<'tcx>,
-) -> FxHashMap<((u32, u32), (u32, u32)), bool> {
-    let mut func_parallel_table: FxHashMap<((u32, u32), (u32, u32)), bool> = FxHashMap::default();
+) -> FxHashSet<((u32, u32), (u32, u32))> {
+    let mut func_parallel_table: FxHashSet<((u32, u32), (u32, u32))> = FxHashSet::default();
 
     let func_calls: Vec<(u32, u32, Symbol)> = body
         .basic_blocks
@@ -478,11 +513,10 @@ fn find_func_parallel<'tcx>(
                     *stmt_no2,
                 );
 
-                func_parallel_table.insert(
-                    ((*block_id1, *stmt_no1), (*block_id2, *stmt_no2)), is_parallel,
-                );
-
                 if is_parallel {
+                    func_parallel_table.insert(
+                        ((*block_id1, *stmt_no1), (*block_id2, *stmt_no2))
+                    );
                     println!("{:?}_{:?} with {:?}_{:?} can run in parallel:", block_id1, func1, block_id2, func2);
                 }
             }
