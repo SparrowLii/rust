@@ -24,7 +24,7 @@ use std::fmt::{Debug, Formatter};
 use std::hash::{BuildHasher, Hash};
 use std::intrinsics::likely;
 use std::marker::PhantomData;
-use std::mem::MaybeUninit;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ops::{Deref, DerefMut};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
@@ -564,11 +564,15 @@ impl<K: Eq + Hash, V: Eq, S: BuildHasher> HashMapExt<K, V> for HashMap<K, V, S> 
     }
 }
 
+union LockRaw {
+    borrow: ManuallyDrop<Cell<bool>>,
+    mutex: ManuallyDrop<RawMutex>,
+}
+
 pub struct Lock<T> {
     single_thread: bool,
+    raw: LockRaw,
     data: UnsafeCell<T>,
-    borrow: Cell<bool>,
-    mutex: RawMutex,
 }
 
 impl<T: Debug> Debug for Lock<T> {
@@ -590,13 +594,19 @@ impl<T: Debug> Debug for Lock<T> {
 }
 
 impl<T> Lock<T> {
-    #[inline]
     pub fn new(val: T) -> Self {
-        Lock {
-            single_thread: !active(),
-            data: UnsafeCell::new(val),
-            borrow: Cell::new(false),
-            mutex: RawMutex::INIT,
+        if likely(!active()) {
+            Lock {
+                single_thread: true,
+                raw: LockRaw { borrow: ManuallyDrop::new(Cell::new(false)) },
+                data: UnsafeCell::new(val),
+            }
+        } else {
+            Lock {
+                single_thread: true,
+                raw: LockRaw { mutex: ManuallyDrop::new(RawMutex::INIT) },
+                data: UnsafeCell::new(val),
+            }
         }
     }
 
@@ -612,25 +622,18 @@ impl<T> Lock<T> {
 
     #[inline]
     pub fn try_lock(&self) -> Option<LockGuard<'_, T>> {
-        // SAFETY: the `&mut T` is accessible as long as self exists.
         if likely(self.single_thread) {
-            if self.borrow.get() {
+            if unsafe { self.raw.borrow.get() } {
                 None
             } else {
-                self.borrow.set(true);
-                Some(LockGuard {
-                    lock: &self,
-                    marker: PhantomData,
-                })
+                unsafe { self.raw.borrow.set(true) };
+                Some(LockGuard { lock: &self, marker: PhantomData })
             }
         } else {
-            if !self.mutex.try_lock() {
+            if unsafe { !self.raw.mutex.try_lock() } {
                 None
             } else {
-                Some(LockGuard {
-                    lock: &self,
-                    marker: PhantomData,
-                })
+                Some(LockGuard { lock: &self, marker: PhantomData })
             }
         }
     }
@@ -638,10 +641,14 @@ impl<T> Lock<T> {
     #[inline(never)]
     fn lock_raw(&self) {
         if likely(self.single_thread) {
-            assert!(!self.borrow.get());
-            self.borrow.set(true);
+            unsafe {
+                assert!(!self.raw.borrow.get());
+                self.raw.borrow.set(true);
+            }
         } else {
-            self.mutex.lock();
+            unsafe {
+                self.raw.mutex.lock();
+            }
         }
     }
 
@@ -649,10 +656,7 @@ impl<T> Lock<T> {
     #[track_caller]
     pub fn lock(&self) -> LockGuard<'_, T> {
         self.lock_raw();
-        LockGuard {
-            lock: &self,
-            marker: PhantomData,
-        }
+        LockGuard { lock: &self, marker: PhantomData }
     }
 
     #[inline(always)]
@@ -714,15 +718,17 @@ impl<T> const DerefMut for LockGuard<'_, T> {
 
 #[inline(never)]
 unsafe fn unlock_mt<T>(guard: &mut LockGuard<'_, T>) {
-    guard.lock.mutex.unlock()
+    unsafe { guard.lock.raw.mutex.unlock() }
 }
 
 impl<'a, T> Drop for LockGuard<'a, T> {
     #[inline]
     fn drop(&mut self) {
         if likely(self.lock.single_thread) {
-            debug_assert!(self.lock.borrow.get());
-            self.lock.borrow.set(false);
+            unsafe {
+                debug_assert!(self.lock.raw.borrow.get());
+                self.lock.raw.borrow.set(false);
+            }
         } else {
             unsafe { unlock_mt(self) }
         }
