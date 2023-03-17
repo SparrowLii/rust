@@ -636,27 +636,22 @@ impl<T> Lock<T> {
     }
 
     #[inline(never)]
-    fn lock_mt(&self) {
-        self.mutex.lock();
-    }
-
-    #[inline]
-    #[track_caller]
-    pub fn lock(&self) -> LockGuard<'_, T> {
-        // SAFETY: the `&mut T` is accessible as long as self exists.
+    fn lock_raw(&self) {
         if likely(self.single_thread) {
             assert!(!self.borrow.get());
             self.borrow.set(true);
-            LockGuard {
-                lock: &self,
-                marker: PhantomData,
-            }
         } else {
-            self.lock_mt();
-            LockGuard {
-                lock: &self,
-                marker: PhantomData,
-            }
+            self.mutex.lock();
+        }
+    }
+
+    #[inline(always)]
+    #[track_caller]
+    pub fn lock(&self) -> LockGuard<'_, T> {
+        self.lock_raw();
+        LockGuard {
+            lock: &self,
+            marker: PhantomData,
         }
     }
 
