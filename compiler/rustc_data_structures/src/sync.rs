@@ -24,7 +24,7 @@ use std::fmt::{Debug, Formatter};
 use std::hash::{BuildHasher, Hash};
 use std::intrinsics::likely;
 use std::marker::PhantomData;
-use std::mem::{ManuallyDrop, MaybeUninit};
+use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
@@ -564,15 +564,11 @@ impl<K: Eq + Hash, V: Eq, S: BuildHasher> HashMapExt<K, V> for HashMap<K, V, S> 
     }
 }
 
-union LockRaw {
-    borrow: ManuallyDrop<Cell<bool>>,
-    mutex: ManuallyDrop<RawMutex>,
-}
-
 pub struct Lock<T> {
     single_thread: bool,
-    raw: LockRaw,
     data: UnsafeCell<T>,
+    borrow: Cell<bool>,
+    mutex: RawMutex,
 }
 
 impl<T: Debug> Debug for Lock<T> {
@@ -594,19 +590,13 @@ impl<T: Debug> Debug for Lock<T> {
 }
 
 impl<T> Lock<T> {
+    #[inline]
     pub fn new(val: T) -> Self {
-        if likely(!active()) {
-            Lock {
-                single_thread: true,
-                raw: LockRaw { borrow: ManuallyDrop::new(Cell::new(false)) },
-                data: UnsafeCell::new(val),
-            }
-        } else {
-            Lock {
-                single_thread: true,
-                raw: LockRaw { mutex: ManuallyDrop::new(RawMutex::INIT) },
-                data: UnsafeCell::new(val),
-            }
+        Lock {
+            single_thread: !active(),
+            data: UnsafeCell::new(val),
+            borrow: Cell::new(false),
+            mutex: RawMutex::INIT,
         }
     }
 
@@ -620,20 +610,26 @@ impl<T> Lock<T> {
         self.data.get_mut()
     }
 
-    #[inline]
     pub fn try_lock(&self) -> Option<LockGuard<'_, T>> {
+        // SAFETY: the `&mut T` is accessible as long as self exists.
         if likely(self.single_thread) {
-            if unsafe { self.raw.borrow.get() } {
+            if likely(self.borrow.get()) {
                 None
             } else {
-                unsafe { self.raw.borrow.set(true) };
-                Some(LockGuard { lock: &self, marker: PhantomData })
+                self.borrow.set(true);
+                Some(LockGuard {
+                    lock: &self,
+                    marker: PhantomData,
+                })
             }
         } else {
-            if unsafe { !self.raw.mutex.try_lock() } {
+            if !self.mutex.try_lock() {
                 None
             } else {
-                Some(LockGuard { lock: &self, marker: PhantomData })
+                Some(LockGuard {
+                    lock: &self,
+                    marker: PhantomData,
+                })
             }
         }
     }
@@ -641,14 +637,10 @@ impl<T> Lock<T> {
     #[inline(never)]
     fn lock_raw(&self) {
         if likely(self.single_thread) {
-            unsafe {
-                assert!(!self.raw.borrow.get());
-                self.raw.borrow.set(true);
-            }
+            assert!(!self.borrow.get());
+            self.borrow.set(true);
         } else {
-            unsafe {
-                self.raw.mutex.lock();
-            }
+            self.mutex.lock();
         }
     }
 
@@ -656,7 +648,10 @@ impl<T> Lock<T> {
     #[track_caller]
     pub fn lock(&self) -> LockGuard<'_, T> {
         self.lock_raw();
-        LockGuard { lock: &self, marker: PhantomData }
+        LockGuard {
+            lock: &self,
+            marker: PhantomData,
+        }
     }
 
     #[inline(always)]
@@ -705,12 +700,14 @@ pub struct LockGuard<'a, T> {
 impl<T> const Deref for LockGuard<'_, T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &T {
         unsafe { &*self.lock.data.get() }
     }
 }
 
 impl<T> const DerefMut for LockGuard<'_, T> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut T {
         unsafe { &mut *self.lock.data.get() }
     }
@@ -718,17 +715,14 @@ impl<T> const DerefMut for LockGuard<'_, T> {
 
 #[inline(never)]
 unsafe fn unlock_mt<T>(guard: &mut LockGuard<'_, T>) {
-    unsafe { guard.lock.raw.mutex.unlock() }
+    guard.lock.mutex.unlock()
 }
 
 impl<'a, T> Drop for LockGuard<'a, T> {
-    #[inline]
     fn drop(&mut self) {
         if likely(self.lock.single_thread) {
-            unsafe {
-                debug_assert!(self.lock.raw.borrow.get());
-                self.lock.raw.borrow.set(false);
-            }
+            debug_assert!(self.lock.borrow.get());
+            self.lock.borrow.set(false);
         } else {
             unsafe { unlock_mt(self) }
         }
