@@ -647,7 +647,7 @@ impl<T> Lock<T> {
         if try_lock_raw(&self.raw) {
             Some(LockGuard {
                 value: unsafe { NonNull::new_unchecked(self.data.get()) },
-                raw: &self.raw,
+                _raw: BorrowLockRaw { raw: &self.raw },
                 marker: PhantomData,
             })
         } else {
@@ -661,7 +661,7 @@ impl<T> Lock<T> {
         lock_raw(&self.raw);
         LockGuard {
             value: unsafe { NonNull::new_unchecked(self.data.get()) },
-            raw: &self.raw,
+            _raw: BorrowLockRaw { raw: &self.raw },
             marker: PhantomData,
         }
     }
@@ -704,9 +704,13 @@ impl<T: Clone> Clone for Lock<T> {
 unsafe impl<T: Send> std::marker::Send for Lock<T> {}
 unsafe impl<T: Send> std::marker::Sync for Lock<T> {}
 
+struct BorrowLockRaw<'a> {
+    raw: &'a LockRaw,
+}
+
 pub struct LockGuard<'a, T> {
     value: NonNull<T>,
-    raw: &'a LockRaw,
+    _raw: BorrowLockRaw<'a>,
     marker: PhantomData<&'a mut T>,
 }
 
@@ -727,18 +731,18 @@ impl<T> const DerefMut for LockGuard<'_, T> {
 }
 
 #[inline(never)]
-unsafe fn unlock_mt<T>(guard: &mut LockGuard<'_, T>) {
-    guard.raw.mutex.unlock()
+unsafe fn unlock_mt(raw: &LockRaw) {
+    raw.mutex.unlock()
 }
 
-impl<'a, T> Drop for LockGuard<'a, T> {
+impl<'a> Drop for BorrowLockRaw<'a> {
     #[inline]
     fn drop(&mut self) {
         if likely(self.raw.single_thread) {
             debug_assert!(self.raw.borrow.get());
             self.raw.borrow.set(false);
         } else {
-            unsafe { unlock_mt(self) }
+            unsafe { unlock_mt(self.raw) }
         }
     }
 }
