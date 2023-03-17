@@ -31,6 +31,7 @@
 #![feature(sync_unsafe_cell)]
 #![feature(const_trait_impl)]
 #![feature(const_mut_refs)]
+#![feature(const_ptr_as_ref)]
 #![allow(rustc::default_hash_types)]
 #![allow(rustc::potential_query_instability)]
 #![deny(rustc::untranslatable_diagnostic)]
