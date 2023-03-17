@@ -27,7 +27,6 @@ use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
-use std::ptr::NonNull;
 
 pub use std::sync::atomic::Ordering;
 pub use std::sync::atomic::Ordering::SeqCst;
@@ -620,7 +619,6 @@ impl<T> Lock<T> {
             } else {
                 self.borrow.set(true);
                 Some(LockGuard {
-                    value: unsafe { NonNull::new_unchecked(self.data.get()) },
                     lock: &self,
                     marker: PhantomData,
                 })
@@ -630,7 +628,6 @@ impl<T> Lock<T> {
                 None
             } else {
                 Some(LockGuard {
-                    value: unsafe { NonNull::new_unchecked(self.data.get()) },
                     lock: &self,
                     marker: PhantomData,
                 })
@@ -639,13 +636,8 @@ impl<T> Lock<T> {
     }
 
     #[inline(never)]
-    fn lock_mt(&self) -> LockGuard<'_, T> {
+    fn lock_mt(&self) {
         self.mutex.lock();
-        LockGuard {
-            value: unsafe { NonNull::new_unchecked(self.data.get()) },
-            lock: &self,
-            marker: PhantomData,
-        }
     }
 
     #[inline]
@@ -656,12 +648,15 @@ impl<T> Lock<T> {
             assert!(!self.borrow.get());
             self.borrow.set(true);
             LockGuard {
-                value: unsafe { NonNull::new_unchecked(self.data.get()) },
                 lock: &self,
                 marker: PhantomData,
             }
         } else {
-            self.lock_mt()
+            self.lock_mt();
+            LockGuard {
+                lock: &self,
+                marker: PhantomData,
+            }
         }
     }
 
@@ -704,7 +699,6 @@ unsafe impl<T: Send> std::marker::Send for Lock<T> {}
 unsafe impl<T: Send> std::marker::Sync for Lock<T> {}
 
 pub struct LockGuard<'a, T> {
-    value: NonNull<T>,
     lock: &'a Lock<T>,
     marker: PhantomData<&'a mut T>,
 }
@@ -713,13 +707,13 @@ impl<T> const Deref for LockGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { self.value.as_ref() }
+        unsafe { &*self.lock.data.get() }
     }
 }
 
 impl<T> const DerefMut for LockGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { self.value.as_mut() }
+        unsafe { &mut *self.lock.data.get() }
     }
 }
 
