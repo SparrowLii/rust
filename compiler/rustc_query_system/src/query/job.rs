@@ -126,7 +126,6 @@ impl<D: DepKind> QueryJob<D> {
 impl QueryJobId {
     #[cold]
     #[inline(never)]
-    #[cfg(not(parallel_compiler))]
     pub(super) fn find_cycle_in_stack<D: DepKind>(
         &self,
         query_map: QueryMap<D>,

@@ -216,6 +216,18 @@ where
                     }
                     #[cfg(parallel_compiler)]
                     QueryResult::Started(job) => {
+                        if !rustc_data_structures::sync::active() {
+                            let id = job.id;
+                            drop(state_lock);
+
+                            // If we are single-threaded we know that we have cycle error,
+                            // so we just return the error.
+                            return TryGetJob::Cycle(id.find_cycle_in_stack(
+                                qcx.try_collect_active_jobs().unwrap(),
+                                &current_job_id,
+                                span,
+                            ));
+                        }
                         // For parallel queries, we'll block and wait until the query running
                         // in another thread has completed. Record how long we wait in the
                         // self-profiler.
