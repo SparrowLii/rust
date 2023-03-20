@@ -14,7 +14,7 @@ use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
 #[cfg(parallel_compiler)]
 use rustc_data_structures::profiling::TimingGuard;
-#[cfg(parallel_compiler)]
+
 use rustc_data_structures::sharded::Sharded;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_data_structures::sync::{Lock, LockGuard};
@@ -31,10 +31,7 @@ use thin_vec::ThinVec;
 use super::QueryConfig;
 
 pub struct QueryState<K, D: DepKind> {
-    #[cfg(parallel_compiler)]
     active: Sharded<FxHashMap<K, QueryResult<D>>>,
-    #[cfg(not(parallel_compiler))]
-    active: Lock<FxHashMap<K, QueryResult<D>>>,
 }
 
 /// Indicates the state of a query for a given key in a query map.
@@ -53,14 +50,9 @@ where
     D: DepKind,
 {
     pub fn all_inactive(&self) -> bool {
-        #[cfg(parallel_compiler)]
         {
             let shards = self.active.lock_shards();
             shards.iter().all(|shard| shard.is_empty())
-        }
-        #[cfg(not(parallel_compiler))]
-        {
-            self.active.lock().is_empty()
         }
     }
 
@@ -70,7 +62,6 @@ where
         make_query: fn(Qcx, K) -> QueryStackFrame<D>,
         jobs: &mut QueryMap<D>,
     ) -> Option<()> {
-        #[cfg(parallel_compiler)]
         {
             // We use try_lock_shards here since we are called from the
             // deadlock handler, and this shouldn't be locked.
@@ -81,19 +72,6 @@ where
                         let query = make_query(qcx, *k);
                         jobs.insert(job.id, QueryJobInfo { query, job: job.clone() });
                     }
-                }
-            }
-        }
-        #[cfg(not(parallel_compiler))]
-        {
-            // We use try_lock here since we are called from the
-            // deadlock handler, and this shouldn't be locked.
-            // (FIXME: Is this relevant for non-parallel compilers? It doesn't
-            // really hurt much.)
-            for (k, v) in self.active.try_lock()?.iter() {
-                if let QueryResult::Started(ref job) = *v {
-                    let query = make_query(qcx, *k);
-                    jobs.insert(job.id, QueryJobInfo { query, job: job.clone() });
                 }
             }
         }
@@ -270,10 +248,7 @@ where
         cache.complete(key, result, dep_node_index);
 
         let job = {
-            #[cfg(parallel_compiler)]
             let mut lock = state.active.get_shard_by_value(&key).lock();
-            #[cfg(not(parallel_compiler))]
-            let mut lock = state.active.lock();
             match lock.remove(&key).unwrap() {
                 QueryResult::Started(job) => job,
                 QueryResult::Poisoned => panic!(),
@@ -295,10 +270,7 @@ where
         // Poison the query so jobs waiting on it panic.
         let state = self.state;
         let job = {
-            #[cfg(parallel_compiler)]
             let mut shard = state.active.get_shard_by_value(&self.key).lock();
-            #[cfg(not(parallel_compiler))]
-            let mut shard = state.active.lock();
             let job = match shard.remove(&self.key).unwrap() {
                 QueryResult::Started(job) => job,
                 QueryResult::Poisoned => panic!(),
@@ -371,10 +343,7 @@ where
     Qcx: QueryContext,
 {
     let state = query.query_state(qcx);
-    #[cfg(parallel_compiler)]
     let state_lock = state.active.get_shard_by_value(&key).lock();
-    #[cfg(not(parallel_compiler))]
-    let state_lock = state.active.lock();
 
     // For the parallel compiler we need to check both the query cache and query state structures
     // while holding the state lock to ensure that 1) the query has not yet completed and 2) the
