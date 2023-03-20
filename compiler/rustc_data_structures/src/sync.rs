@@ -225,15 +225,9 @@ cfg_if! {
 
         pub use std::rc::Rc as Lrc;
         pub use std::rc::Weak as Weak;
-        pub use std::cell::Ref as ReadGuard;
-        pub use std::cell::Ref as MappedReadGuard;
-        pub use std::cell::RefMut as WriteGuard;
-        pub use std::cell::RefMut as MappedWriteGuard;
         pub use std::cell::RefMut as MappedLockGuard;
 
         pub use std::cell::OnceCell;
-
-        use std::cell::RefCell as InnerRwLock;
 
         pub type MTRef<'a, T> = &'a mut T;
 
@@ -278,11 +272,6 @@ cfg_if! {
         pub use std::marker::Send as Send;
         pub use std::marker::Sync as Sync;
 
-        pub use parking_lot::RwLockReadGuard as ReadGuard;
-        pub use parking_lot::MappedRwLockReadGuard as MappedReadGuard;
-        pub use parking_lot::RwLockWriteGuard as WriteGuard;
-        pub use parking_lot::MappedRwLockWriteGuard as MappedWriteGuard;
-
         pub use parking_lot::MappedMutexGuard as MappedLockGuard;
 
         pub use std::sync::OnceLock as OnceCell;
@@ -323,8 +312,6 @@ cfg_if! {
                 self.lock()
             }
         }
-
-        use parking_lot::RwLock as InnerRwLock;
 
         use std::thread;
 
@@ -490,10 +477,6 @@ cfg_if! {
 
         pub type MetadataRef = OwningRef<Box<dyn Erased + Send + Sync>, [u8]>;
 
-        /// This makes locks panic if they are already held.
-        /// It is only useful when you are running in a single thread
-        const ERROR_CHECKING: bool = false;
-
         #[macro_export]
         macro_rules! rustc_erase_owner {
             ($v:expr) => {{
@@ -563,6 +546,9 @@ impl<K: Eq + Hash, V: Eq, S: BuildHasher> HashMapExt<K, V> for HashMap<K, V, S> 
         self.entry(key).and_modify(|old| assert!(*old == value)).or_insert(value);
     }
 }
+/// This makes locks panic if they are already held.
+/// It is only useful when you are running in a single thread
+const ERROR_CHECKING: bool = false;
 
 pub struct Lock<T> {
     single_thread: bool,
@@ -720,6 +706,13 @@ impl<'a, T> Drop for LockGuard<'a, T> {
     }
 }
 
+pub use parking_lot::RwLockReadGuard as ReadGuard;
+pub use parking_lot::MappedRwLockReadGuard as MappedReadGuard;
+pub use parking_lot::RwLockWriteGuard as WriteGuard;
+pub use parking_lot::MappedRwLockWriteGuard as MappedWriteGuard;
+
+use parking_lot::RwLock as InnerRwLock;
+
 #[derive(Debug, Default)]
 pub struct RwLock<T>(InnerRwLock<T>);
 
@@ -739,14 +732,6 @@ impl<T> RwLock<T> {
         self.0.get_mut()
     }
 
-    #[cfg(not(parallel_compiler))]
-    #[inline(always)]
-    #[track_caller]
-    pub fn read(&self) -> ReadGuard<'_, T> {
-        self.0.borrow()
-    }
-
-    #[cfg(parallel_compiler)]
     #[inline(always)]
     pub fn read(&self) -> ReadGuard<'_, T> {
         if ERROR_CHECKING {
@@ -762,26 +747,11 @@ impl<T> RwLock<T> {
         f(&*self.read())
     }
 
-    #[cfg(not(parallel_compiler))]
-    #[inline(always)]
-    pub fn try_write(&self) -> Result<WriteGuard<'_, T>, ()> {
-        self.0.try_borrow_mut().map_err(|_| ())
-    }
-
-    #[cfg(parallel_compiler)]
     #[inline(always)]
     pub fn try_write(&self) -> Result<WriteGuard<'_, T>, ()> {
         self.0.try_write().ok_or(())
     }
 
-    #[cfg(not(parallel_compiler))]
-    #[inline(always)]
-    #[track_caller]
-    pub fn write(&self) -> WriteGuard<'_, T> {
-        self.0.borrow_mut()
-    }
-
-    #[cfg(parallel_compiler)]
     #[inline(always)]
     pub fn write(&self) -> WriteGuard<'_, T> {
         if ERROR_CHECKING {
@@ -809,25 +779,11 @@ impl<T> RwLock<T> {
         self.write()
     }
 
-    #[cfg(not(parallel_compiler))]
-    #[inline(always)]
-    pub fn clone_guard<'a>(rg: &ReadGuard<'a, T>) -> ReadGuard<'a, T> {
-        ReadGuard::clone(rg)
-    }
-
-    #[cfg(parallel_compiler)]
     #[inline(always)]
     pub fn clone_guard<'a>(rg: &ReadGuard<'a, T>) -> ReadGuard<'a, T> {
         ReadGuard::rwlock(&rg).read()
     }
 
-    #[cfg(not(parallel_compiler))]
-    #[inline(always)]
-    pub fn leak(&self) -> &T {
-        ReadGuard::leak(self.read())
-    }
-
-    #[cfg(parallel_compiler)]
     #[inline(always)]
     pub fn leak(&self) -> &T {
         let guard = self.read();
