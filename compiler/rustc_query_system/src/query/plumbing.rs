@@ -161,12 +161,10 @@ where
         cache.complete(key, result, dep_node_index);
 
         let job = {
-            let mut lock = state.active.get_shard_by_value(&key).lock();
-
-            match lock.remove(&key).unwrap() {
+            state.active.with_get_shard_by_value(&key, |lock| match lock.remove(&key).unwrap() {
                 QueryResult::Started(job) => job,
                 QueryResult::Poisoned => panic!(),
-            }
+            })
         };
 
         job.signal_complete();
@@ -184,14 +182,14 @@ where
         // Poison the query so jobs waiting on it panic.
         let state = self.state;
         let job = {
-            let mut shard = state.active.get_shard_by_value(&self.key).lock();
-
-            let job = match shard.remove(&self.key).unwrap() {
-                QueryResult::Started(job) => job,
-                QueryResult::Poisoned => panic!(),
-            };
-            shard.insert(self.key, QueryResult::Poisoned);
-            job
+            state.active.with_get_shard_by_value(&self.key, |shard| {
+                let job = match shard.remove(&self.key).unwrap() {
+                    QueryResult::Started(job) => job,
+                    QueryResult::Poisoned => panic!(),
+                };
+                shard.insert(self.key, QueryResult::Poisoned);
+                job
+            })
         };
         // Also signal the completion of the job, so waiters
         // will continue execution.

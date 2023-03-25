@@ -1333,7 +1333,7 @@ impl<K: DepKind> CurrentDepGraph<K> {
     ) {
         let node = &prev_graph.index_to_node(prev_index);
         debug_assert!(
-            !self.new_node_to_index.get_shard_by_value(node).lock().contains_key(node),
+            !self.new_node_to_index.with_get_shard_by_value(node, |lock| lock.contains_key(node)),
             "node from previous graph present in new node collection"
         );
     }
