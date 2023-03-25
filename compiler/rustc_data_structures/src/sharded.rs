@@ -32,13 +32,21 @@ impl<T: Default> Default for Sharded<T> {
     }
 }
 
-impl<T> Sharded<T> {
+impl<T: Default> Sharded<T> {
     #[inline]
     pub fn new(mut value: impl FnMut() -> T) -> Self {
-        Sharded {
-            single_thread: !active(),
-            shard: Lock::new(value()),
-            shards: [(); SHARDS].map(|()| CacheAligned(Lock::new(value()))),
+        if likely(!active()) {
+            Sharded {
+                single_thread: !active(),
+                shard: Lock::new(value()),
+                shards: [(); SHARDS].map(|()| CacheAligned(Lock::new(T::default()))),
+            }
+        } else {
+            Sharded {
+                single_thread: !active(),
+                shard: Lock::new(T::default()),
+                shards: [(); SHARDS].map(|()| CacheAligned(Lock::new(value()))),
+            }
         }
     }
 
@@ -57,16 +65,6 @@ impl<T> Sharded<T> {
             r
         } else {
             self.shards[get_shard_index_by_hash(make_hash(val))].0.with_mt_lock(f)
-        }
-    }
-
-    /// The shard is selected by hashing `val` with `FxHasher`.
-    #[inline]
-    pub fn get_shard_by_value<K: Hash + ?Sized>(&self, val: &K) -> &Lock<T> {
-        if likely(self.single_thread) {
-            &self.shard
-        } else {
-            &self.shards[get_shard_index_by_hash(make_hash(val))].0
         }
     }
 
