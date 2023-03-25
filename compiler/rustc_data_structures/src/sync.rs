@@ -591,8 +591,8 @@ impl<K: Eq + Hash, V: Eq, S: BuildHasher> HashMapExt<K, V> for HashMap<K, V, S> 
 
 pub struct Lock<T> {
     single_thread: bool,
-    data: UnsafeCell<T>,
-    borrow: Cell<bool>,
+    pub(crate) data: UnsafeCell<T>,
+    pub(crate) borrow: Cell<bool>,
     mutex: RawMutex,
 }
 
@@ -657,8 +657,7 @@ impl<T> Lock<T> {
     #[inline(never)]
     fn lock_raw(&self) {
         if likely(self.single_thread) {
-            assert!(!self.borrow.get());
-            self.borrow.set(true);
+            assert!(!self.borrow.replace(true));
         } else {
             self.mutex.lock();
         }
@@ -671,10 +670,50 @@ impl<T> Lock<T> {
         LockGuard { lock: &self, marker: PhantomData }
     }
 
+    #[inline(never)]
+    pub(crate) fn with_mt_lock<F: FnOnce(&mut T) -> R, R>(&self, f: F) -> R {
+        unsafe {
+            self.mutex.lock();
+            let r = f(&mut *self.data.get());
+            self.mutex.unlock();
+            r
+        }
+    }
+
     #[inline(always)]
     #[track_caller]
     pub fn with_lock<F: FnOnce(&mut T) -> R, R>(&self, f: F) -> R {
-        f(&mut *self.lock())
+        if likely(self.single_thread) {
+            assert!(!self.borrow.replace(true));
+            let r = unsafe { f(&mut *self.data.get()) };
+            self.borrow.set(false);
+            r
+        } else {
+            self.with_mt_lock(f)
+        }
+    }
+
+    #[inline(never)]
+    fn with_mt_borrow<F: FnOnce(&T) -> R, R>(&self, f: F) -> R {
+        unsafe {
+            self.mutex.lock();
+            let r = f(&*self.data.get());
+            self.mutex.unlock();
+            r
+        }
+    }
+
+    #[inline(always)]
+    #[track_caller]
+    pub fn with_borrow<F: FnOnce(&T) -> R, R>(&self, f: F) -> R {
+        if likely(self.single_thread) {
+            assert!(!self.borrow.replace(true));
+            let r = unsafe { f(&*self.data.get()) };
+            self.borrow.set(false);
+            r
+        } else {
+            self.with_mt_borrow(f)
+        }
     }
 
     #[inline(always)]

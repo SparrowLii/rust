@@ -22,8 +22,10 @@ use rustc_data_structures::{cold_path, sharded::Sharded};
 use rustc_data_structures::profiling::TimingGuard;
 use rustc_data_structures::sharded::Sharded;
 use rustc_data_structures::stack::ensure_sufficient_stack;
-use rustc_data_structures::sync::{Lock, LockGuard};use rustc_errors::{DiagnosticBuilder, ErrorGuaranteed, FatalError};
-use rustc_span::{Span, DUMMY_SP};
+
+use rustc_data_structures::sync::Lock;
+use rustc_errors::{DiagnosticBuilder, ErrorGuaranteed, FatalError};
+use rustc_session::Session;use rustc_span::{Span, DUMMY_SP};
 use std::cell::Cell;
 use std::collections::hash_map::Entry;
 use std::fmt::Debug;
@@ -296,9 +298,7 @@ where
     Qcx: QueryContext,
 {
     let state = query.query_state(qcx);
-    let mut state_lock = state.active.get_shard_by_value(&key).lock();
-    let state_lock = state.active.lock();
-    // For the parallel compiler we need to check both the query cache and query state structures
+    /*// For the parallel compiler we need to check both the query cache and query state structures
     // while holding the state lock to ensure that 1) the query has not yet completed and 2) the
     // query is not still executing. Without checking the query cache here, we can end up
     // re-executing the query since `try_start` only checks that the query is not currently
@@ -309,33 +309,32 @@ where
             qcx.dep_context().profiler().query_cache_hit(index.into());
             return (value, Some(index));
         }
-    }
+    }*/
 
-    let current_job_id = qcx.current_query_job();
+    let job = state.active.with_get_shard_by_value(&key, |state_lock| {
+        JobOwner::<'_, Q::Key, Qcx::DepKind>::try_start(&qcx, state, state_lock, span, key)
+    });
 
-    match state_lock.entry(key) {
-        Entry::Vacant(entry) => {
-            // Nothing has computed or is computing the query, so we start a new job and insert it in the
-            // state map.
-            let id = qcx.next_job_id();
-            let job = QueryJob::new(id, span, current_job_id);
-            entry.insert(QueryResult::Started(job));
+    match job {
+        TryGetJob::NotYetStarted(job) => {
+            let (result, dep_node_index) = execute_job(query, qcx, key.clone(), dep_node, job.id);
+            let cache = query.query_cache(qcx);
+            if query.feedable() {
+                // We should not compute queries that also got a value via feeding.
+                // This can't happen, as query feeding adds the very dependencies to the fed query
+                // as its feeding query had. So if the fed query is red, so is its feeder, which will
+                // get evaluated first, and re-feed the query.
+                if let Some((cached_result, _)) = cache.lookup(&key) {
+                    panic!(
+                        "fed query later has its value computed. The already cached value: {cached_result:?}"
+                    );
 
-            // Drop the lock before we start executing the query
-            drop(state_lock);
 
-            execute_job(query, qcx, state, key, id, dep_node)
-        }
-        Entry::Occupied(mut entry) => {
-            match entry.get_mut() {
-                #[cfg(not(parallel_compiler))]
-                QueryResult::Started(job) => {
-                    let id = job.id;
-                    drop(state_lock);
 
-                    // If we are single-threaded we know that we have cycle error,
-                    // so we just return the error.
-                    cycle_error(query, qcx, id, span)
+
+
+
+
                 }
                 #[cfg(parallel_compiler)]
                 QueryResult::Started(job) => {
@@ -348,41 +347,30 @@ where
                 QueryResult::Poisoned => FatalError.raise(),
             }
         }
-    }
-}
-
-#[inline(always)]
-fn execute_job<Q, Qcx>(
-    query: Q,
-    qcx: Qcx,
-    state: &QueryState<Q::Key, Qcx::DepKind>,
-    key: Q::Key,
-    id: QueryJobId,
-    dep_node: Option<DepNode<Qcx::DepKind>>,
-) -> (Q::Value, Option<DepNodeIndex>)
-where
-    Q: QueryConfig<Qcx>,
-    Qcx: QueryContext,
-{
-    // Use `JobOwner` so the query will be poisoned if executing it panics.
-    let job_owner = JobOwner { state, key };
-
-    let (result, dep_node_index) = match qcx.dep_context().dep_graph().data() {
-        None => execute_job_non_incr(query, qcx, key, id),
-        Some(data) => execute_job_incr(query, qcx, data, key, dep_node, id),
-    };
-
-    let cache = query.query_cache(qcx);
-    if query.feedable() {
-        // We should not compute queries that also got a value via feeding.
-        // This can't happen, as query feeding adds the very dependencies to the fed query
-        // as its feeding query had. So if the fed query is red, so is its feeder, which will
-        // get evaluated first, and re-feed the query.
-        if let Some((cached_result, _)) = cache.lookup(&key) {
-            panic!(
-                "fed query later has its value computed. The already cached value: {cached_result:?}"
-            );
+        TryGetJob::Cycle(error) => {
+            let result = mk_cycle(qcx, error, query.handle_cycle_error());
+            (result, None)
         }
+        #[cfg(parallel_compiler)]
+        TryGetJob::JobWait(current_job_id, query_blocked_prof_timer, latch) => {
+            // With parallel queries we might just have to wait on some other
+            // thread.
+            let result = latch.wait_on(current_job_id, span);
+            match result {
+                Ok(()) => {
+                    let Some((v, index)) = query.query_cache(qcx).lookup(&key) else {
+                        panic!("value must be in cache after waiting")
+                    };
+                    qcx.dep_context().profiler().query_cache_hit(index.into());
+                    query_blocked_prof_timer.finish_with_query_invocation_id(index.into());
+
+                    (v, Some(index))
+                }
+                Err(error) => {
+                    let result = mk_cycle(qcx, error, query.handle_cycle_error());
+                    (result, None)
+                }
+            }        }
     }
     job_owner.complete(cache, result, dep_node_index);
 
