@@ -44,11 +44,46 @@ impl<T> Sharded<T> {
 
     /// The shard is selected by hashing `val` with `FxHasher`.
     #[inline]
+    pub fn with_get_shard_by_value<K: Hash + ?Sized, F: FnOnce(&mut T) -> R, R>(
+        &self,
+        val: &K,
+        f: F,
+    ) -> R {
+        if likely(self.single_thread) {
+            let shard = &self.shard;
+            assert!(!shard.borrow.replace(true));
+            let r = unsafe { f(&mut *shard.data.get()) };
+            shard.borrow.set(false);
+            r
+        } else {
+            self.shards[get_shard_index_by_hash(make_hash(val))].0.with_mt_lock(f)
+        }
+    }
+
+    /// The shard is selected by hashing `val` with `FxHasher`.
+    #[inline]
     pub fn get_shard_by_value<K: Hash + ?Sized>(&self, val: &K) -> &Lock<T> {
         if likely(self.single_thread) {
             &self.shard
         } else {
             &self.shards[get_shard_index_by_hash(make_hash(val))].0
+        }
+    }
+
+    #[inline]
+    pub fn with_get_shard_by_hash<F: FnOnce(&mut T) -> R, R>(
+        &self,
+        hash: u64,
+        f: F,
+    ) -> R {
+        if likely(self.single_thread) {
+            let shard = &self.shard;
+            assert!(!shard.borrow.replace(true));
+            let r = unsafe { f(&mut *shard.data.get()) };
+            shard.borrow.set(false);
+            r
+        } else {
+            self.shards[get_shard_index_by_hash(hash)].0.with_mt_lock(f)
         }
     }
 
@@ -94,17 +129,18 @@ impl<K: Eq + Hash + Copy> ShardedHashMap<K, ()> {
         Q: Hash + Eq,
     {
         let hash = make_hash(value);
-        let mut shard = self.get_shard_by_hash(hash).lock();
-        let entry = shard.raw_entry_mut().from_key_hashed_nocheck(hash, value);
+        self.with_get_shard_by_hash(hash, |shard| {
+            let entry = shard.raw_entry_mut().from_key_hashed_nocheck(hash, value);
 
-        match entry {
-            RawEntryMut::Occupied(e) => *e.key(),
-            RawEntryMut::Vacant(e) => {
-                let v = make();
-                e.insert_hashed_nocheck(hash, v, ());
-                v
+            match entry {
+                RawEntryMut::Occupied(e) => *e.key(),
+                RawEntryMut::Vacant(e) => {
+                    let v = make();
+                    e.insert_hashed_nocheck(hash, v, ());
+                    v
+                }
             }
-        }
+        })
     }
 
     #[inline]
@@ -114,17 +150,18 @@ impl<K: Eq + Hash + Copy> ShardedHashMap<K, ()> {
         Q: Hash + Eq,
     {
         let hash = make_hash(&value);
-        let mut shard = self.get_shard_by_hash(hash).lock();
-        let entry = shard.raw_entry_mut().from_key_hashed_nocheck(hash, &value);
+        self.with_get_shard_by_hash(hash, |shard| {
+            let entry = shard.raw_entry_mut().from_key_hashed_nocheck(hash, &value);
 
-        match entry {
-            RawEntryMut::Occupied(e) => *e.key(),
-            RawEntryMut::Vacant(e) => {
-                let v = make(value);
-                e.insert_hashed_nocheck(hash, v, ());
-                v
+            match entry {
+                RawEntryMut::Occupied(e) => *e.key(),
+                RawEntryMut::Vacant(e) => {
+                    let v = make(value);
+                    e.insert_hashed_nocheck(hash, v, ());
+                    v
+                }
             }
-        }
+        })
     }
 }
 
@@ -136,9 +173,11 @@ pub trait IntoPointer {
 impl<K: Eq + Hash + Copy + IntoPointer> ShardedHashMap<K, ()> {
     pub fn contains_pointer_to<T: Hash + IntoPointer>(&self, value: &T) -> bool {
         let hash = make_hash(&value);
-        let shard = self.get_shard_by_hash(hash).lock();
-        let value = value.into_pointer();
-        shard.raw_entry().from_hash(hash, |entry| entry.into_pointer() == value).is_some()
+
+        self.with_get_shard_by_hash(hash, |shard| {
+            let value = value.into_pointer();
+            shard.raw_entry().from_hash(hash, |entry| entry.into_pointer() == value).is_some()
+        })
     }
 }
 

@@ -6,6 +6,8 @@ use crate::dep_graph::{DepContext, DepKind, DepNode, DepNodeIndex, DepNodeParams
 use crate::dep_graph::{DepGraphData, HasDepContext};
 use crate::ich::StableHashingContext;
 use crate::query::caches::QueryCache;
+#[cfg(parallel_compiler)]
+use crate::query::job::QueryLatch;
 use crate::query::job::{report_cycle, QueryInfo, QueryJob, QueryJobId, QueryJobInfo};
 use crate::query::{QueryContext, QueryMap, QuerySideEffects, QueryStackFrame};
 use crate::values::Value;
@@ -16,7 +18,7 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::profiling::TimingGuard;
 use rustc_data_structures::sharded::Sharded;
 use rustc_data_structures::stack::ensure_sufficient_stack;
-use rustc_data_structures::sync::{Lock, LockGuard};
+use rustc_data_structures::sync::Lock;
 use rustc_errors::{DiagnosticBuilder, ErrorGuaranteed, FatalError};
 use rustc_session::Session;
 use rustc_span::{Span, DUMMY_SP};
@@ -151,17 +153,16 @@ where
     fn try_start<'b, Qcx>(
         qcx: &'b Qcx,
         state: &'b QueryState<K, Qcx::DepKind>,
-        mut state_lock: LockGuard<'b, FxHashMap<K, QueryResult<Qcx::DepKind>>>,
+        state_lock: &mut FxHashMap<K, QueryResult<Qcx::DepKind>>,
         span: Span,
         key: K,
     ) -> TryGetJob<'b, K, D>
     where
         Qcx: QueryContext + HasDepContext<DepKind = D>,
     {
-        let lock = &mut *state_lock;
         let current_job_id = qcx.current_query_job();
 
-        match lock.entry(key) {
+        match state_lock.entry(key) {
             Entry::Vacant(entry) => {
                 let id = qcx.next_job_id();
                 let job = QueryJob::new(id, span, current_job_id);
@@ -177,7 +178,6 @@ where
                     #[cfg(not(parallel_compiler))]
                     QueryResult::Started(job) => {
                         let id = job.id;
-                        drop(state_lock);
 
                         // If we are single-threaded we know that we have cycle error,
                         // so we just return the error.
@@ -191,7 +191,6 @@ where
                     QueryResult::Started(job) => {
                         if !rustc_data_structures::sync::active() {
                             let id = job.id;
-                            drop(state_lock);
 
                             // If we are single-threaded we know that we have cycle error,
                             // so we just return the error.
@@ -209,16 +208,7 @@ where
                         // Get the latch out
                         let latch = job.latch();
 
-                        drop(state_lock);
-
-                        // With parallel queries we might just have to wait on some other
-                        // thread.
-                        let result = latch.wait_on(current_job_id, span);
-
-                        match result {
-                            Ok(()) => TryGetJob::JobCompleted(query_blocked_prof_timer),
-                            Err(cycle) => TryGetJob::Cycle(cycle),
-                        }
+                        TryGetJob::JobWait(current_job_id, query_blocked_prof_timer, latch)
                     }
                     QueryResult::Poisoned => FatalError.raise(),
                 }
@@ -301,7 +291,7 @@ where
     /// Returns the result of the query and its dep-node index
     /// if it succeeded or a cycle error if it failed.
     #[cfg(parallel_compiler)]
-    JobCompleted(TimingGuard<'tcx>),
+    JobWait(Option<QueryJobId>, TimingGuard<'tcx>, QueryLatch<D>),
 
     /// Trying to execute the query resulted in a cycle.
     Cycle(CycleError<D>),
@@ -340,9 +330,8 @@ where
     Qcx: QueryContext,
 {
     let state = query.query_state(qcx);
-    let state_lock = state.active.get_shard_by_value(&key).lock();
 
-    // For the parallel compiler we need to check both the query cache and query state structures
+    /*// For the parallel compiler we need to check both the query cache and query state structures
     // while holding the state lock to ensure that 1) the query has not yet completed and 2) the
     // query is not still executing. Without checking the query cache here, we can end up
     // re-executing the query since `try_start` only checks that the query is not currently
@@ -353,9 +342,13 @@ where
             qcx.dep_context().profiler().query_cache_hit(index.into());
             return (value, Some(index));
         }
-    }
+    }*/
 
-    match JobOwner::<'_, Q::Key, Qcx::DepKind>::try_start(&qcx, state, state_lock, span, key) {
+    let job = state.active.with_get_shard_by_value(&key, |state_lock| {
+        JobOwner::<'_, Q::Key, Qcx::DepKind>::try_start(&qcx, state, state_lock, span, key)
+    });
+
+    match job {
         TryGetJob::NotYetStarted(job) => {
             let (result, dep_node_index) = execute_job(query, qcx, key.clone(), dep_node, job.id);
             let cache = query.query_cache(qcx);
@@ -378,15 +371,27 @@ where
             (result, None)
         }
         #[cfg(parallel_compiler)]
-        TryGetJob::JobCompleted(query_blocked_prof_timer) => {
-            let Some((v, index)) = query.query_cache(qcx).lookup(&key) else {
-                panic!("value must be in cache after waiting")
-            };
+        TryGetJob::JobWait(current_job_id, query_blocked_prof_timer, latch) => {
+            // With parallel queries we might just have to wait on some other
+            // thread.
+            let result = latch.wait_on(current_job_id, span);
 
-            qcx.dep_context().profiler().query_cache_hit(index.into());
-            query_blocked_prof_timer.finish_with_query_invocation_id(index.into());
+            match result {
+                Ok(()) => {
+                    let Some((v, index)) = query.query_cache(qcx).lookup(&key) else {
+                        panic!("value must be in cache after waiting")
+                    };
 
-            (v, Some(index))
+                    qcx.dep_context().profiler().query_cache_hit(index.into());
+                    query_blocked_prof_timer.finish_with_query_invocation_id(index.into());
+
+                    (v, Some(index))
+                }
+                Err(error) => {
+                    let result = mk_cycle(qcx, error, query.handle_cycle_error());
+                    (result, None)
+                }
+            }
         }
     }
 }

@@ -599,10 +599,7 @@ impl<K: DepKind> DepGraphData<K> {
         } else {
             self.current
                 .new_node_to_index
-                .get_shard_by_value(dep_node)
-                .lock()
-                .get(dep_node)
-                .copied()
+                .with_get_shard_by_value(dep_node, |node| node.get(dep_node).copied())
         }
     }
 
@@ -1174,16 +1171,16 @@ impl<K: DepKind> CurrentDepGraph<K> {
         edges: EdgesVec,
         current_fingerprint: Fingerprint,
     ) -> DepNodeIndex {
-        let dep_node_index = match self.new_node_to_index.get_shard_by_value(&key).lock().entry(key)
-        {
-            Entry::Occupied(entry) => *entry.get(),
-            Entry::Vacant(entry) => {
-                let dep_node_index =
-                    self.encoder.borrow().send(profiler, key, current_fingerprint, edges);
-                entry.insert(dep_node_index);
-                dep_node_index
-            }
-        };
+        let dep_node_index =
+            self.new_node_to_index.with_get_shard_by_value(&key, |node| match node.entry(key) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => {
+                    let dep_node_index =
+                        self.encoder.borrow().send(profiler, key, current_fingerprint, edges);
+                    entry.insert(dep_node_index);
+                    dep_node_index
+                }
+            });
 
         #[cfg(debug_assertions)]
         self.record_edge(dep_node_index, key, current_fingerprint);

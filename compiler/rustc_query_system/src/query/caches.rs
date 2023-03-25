@@ -59,20 +59,17 @@ where
     #[inline(always)]
     fn lookup(&self, key: &K) -> Option<(V, DepNodeIndex)> {
         let key_hash = sharded::make_hash(key);
-        let lock = self.cache.get_shard_by_hash(key_hash).lock();
-
-        let result = lock.raw_entry().from_key_hashed_nocheck(key_hash, key);
-
-        if let Some((_, value)) = result { Some(*value) } else { None }
+        self.cache.with_get_shard_by_hash(key_hash, |lock| {
+            let result = lock.raw_entry().from_key_hashed_nocheck(key_hash, key);
+            if let Some((_, value)) = result { Some(*value) } else { None }
+        })
     }
 
     #[inline]
     fn complete(&self, key: K, value: V, index: DepNodeIndex) {
-        let mut lock = self.cache.get_shard_by_value(&key).lock();
-
         // We may be overwriting another value. This is all right, since the dep-graph
         // will check that the fingerprint matches.
-        lock.insert(key, (value, index));
+        self.cache.with_get_shard_by_value(&key, |cache| cache.insert(key, (value, index)));
     }
 
     fn iter(&self, f: &mut dyn FnMut(&Self::Key, &Self::Value, DepNodeIndex)) {
@@ -153,16 +150,16 @@ where
 
     #[inline(always)]
     fn lookup(&self, key: &K) -> Option<(V, DepNodeIndex)> {
-        let lock = self.cache.get_shard_by_hash(key.index() as u64).lock();
-
-        if let Some(Some(value)) = lock.get(*key) { Some(*value) } else { None }
+        self.cache.with_get_shard_by_hash(key.index() as u64, |lock| {
+            if let Some(Some(value)) = lock.get(*key) { Some(*value) } else { None }
+        })
     }
 
     #[inline]
     fn complete(&self, key: K, value: V, index: DepNodeIndex) {
-        let mut lock = self.cache.get_shard_by_hash(key.index() as u64).lock();
-
-        lock.insert(key, (value, index));
+        self.cache.with_get_shard_by_hash(key.index() as u64, |lock| {
+            lock.insert(key, (value, index));
+        })
     }
 
     fn iter(&self, f: &mut dyn FnMut(&Self::Key, &Self::Value, DepNodeIndex)) {
