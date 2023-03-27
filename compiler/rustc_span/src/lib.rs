@@ -1342,7 +1342,7 @@ impl<S: Encoder> Encodable<S> for SourceFile {
         self.end_pos.encode(s);
 
         // We are always in `Lines` form by the time we reach here.
-        assert!(self.lines.borrow().is_lines());
+        assert!(self.lines.with_borrow(|lines| lines.is_lines()));
         self.lines(|lines| {
             // Store the length.
             s.emit_u32(lines.len() as u32);
@@ -1509,8 +1509,7 @@ impl SourceFile {
     where
         F: FnOnce(&[BytePos]) -> R,
     {
-        let mut guard = self.lines.borrow_mut();
-        match &*guard {
+        let f = |guard: &mut SourceFileLines| match guard {
             SourceFileLines::Lines(lines) => f(lines),
             SourceFileLines::Diffs(SourceFileDiffs {
                 mut line_start,
@@ -1519,21 +1518,21 @@ impl SourceFile {
                 raw_diffs,
             }) => {
                 // Convert from "diffs" form to "lines" form.
-                let num_lines = num_diffs + 1;
+                let num_lines = *num_diffs + 1;
                 let mut lines = Vec::with_capacity(num_lines);
                 lines.push(line_start);
 
-                assert_eq!(*num_diffs, raw_diffs.len() / bytes_per_diff);
-                match bytes_per_diff {
+                assert_eq!(*num_diffs, raw_diffs.len() / *bytes_per_diff);
+                match *bytes_per_diff {
                     1 => {
-                        lines.extend(raw_diffs.into_iter().map(|&diff| {
+                        lines.extend(*raw_diffs.into_iter().map(|diff| {
                             line_start = line_start + BytePos(diff as u32);
                             line_start
                         }));
                     }
                     2 => {
                         lines.extend((0..*num_diffs).map(|i| {
-                            let pos = bytes_per_diff * i;
+                            let pos = *bytes_per_diff * i;
                             let bytes = [raw_diffs[pos], raw_diffs[pos + 1]];
                             let diff = u16::from_le_bytes(bytes);
                             line_start = line_start + BytePos(diff as u32);
@@ -1542,7 +1541,7 @@ impl SourceFile {
                     }
                     4 => {
                         lines.extend((0..*num_diffs).map(|i| {
-                            let pos = bytes_per_diff * i;
+                            let pos = *bytes_per_diff * i;
                             let bytes = [
                                 raw_diffs[pos],
                                 raw_diffs[pos + 1],
@@ -1560,7 +1559,8 @@ impl SourceFile {
                 *guard = SourceFileLines::Lines(lines);
                 res
             }
-        }
+        };
+        self.lines.with_lock(f)
     }
 
     /// Returns the `BytePos` of the beginning of the current line.
@@ -1578,7 +1578,7 @@ impl SourceFile {
         F: FnOnce() -> Option<String>,
     {
         if matches!(
-            *self.external_src.borrow(),
+            *self.external_src.borrow().deref(),
             ExternalSource::Foreign { kind: ExternalSourceKind::AbsentOk, .. }
         ) {
             let src = get_src();
@@ -1586,7 +1586,7 @@ impl SourceFile {
             // Check that no-one else have provided the source while we were getting it
             if let ExternalSource::Foreign {
                 kind: src_kind @ ExternalSourceKind::AbsentOk, ..
-            } = &mut *external_src
+            } = external_src.deref_mut()
             {
                 if let Some(mut src) = src {
                     // The src_hash needs to be computed on the pre-normalized src.
@@ -1601,10 +1601,10 @@ impl SourceFile {
 
                 false
             } else {
-                self.src.is_some() || external_src.get_source().is_some()
+                self.src.is_some() || external_src.deref().get_source().is_some()
             }
         } else {
-            self.src.is_some() || self.external_src.borrow().get_source().is_some()
+            self.src.is_some() || self.external_src.with_borrow(|src| src.get_source().is_some())
         }
     }
 
@@ -1630,7 +1630,7 @@ impl SourceFile {
 
         if let Some(ref src) = self.src {
             Some(Cow::from(get_until_newline(src, begin)))
-        } else if let Some(src) = self.external_src.borrow().get_source() {
+        } else if let Some(src) = self.external_src.with_borrow(|src| src.get_source()) {
             Some(Cow::Owned(String::from(get_until_newline(src, begin))))
         } else {
             None

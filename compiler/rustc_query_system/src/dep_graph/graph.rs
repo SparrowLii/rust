@@ -1131,7 +1131,7 @@ impl<K: DepKind> CurrentDepGraph<K> {
                 record_graph,
                 record_stats,
             )),
-            new_node_to_index: Sharded::new(|| {
+            new_node_to_index: Sharded::with_new(|| {
                 FxHashMap::with_capacity_and_hasher(capacity, Default::default())
             }),
             prev_index_to_index: Lock::new(IndexVec::from_elem_n(None, prev_graph_node_count)),
