@@ -34,6 +34,14 @@ impl<T: Default> Default for Sharded<T> {
 impl<T: Default> Sharded<T> {
     #[inline]
     pub fn new(mut value: impl FnMut() -> T) -> Self {
+        Sharded {
+            single_thread: !active(),
+            shard: Lock::new(value()),
+            shards: [(); SHARDS].map(|()| CacheAligned(Lock::new(value()))),
+        }
+    }
+
+    pub fn with_new(mut value: impl FnMut() -> T) -> Self {
         if likely(!active()) {
             Sharded {
                 single_thread: !active(),
@@ -114,7 +122,7 @@ pub type ShardedHashMap<K, V> = Sharded<FxHashMap<K, V>>;
 
 impl<K: Eq, V> ShardedHashMap<K, V> {
     pub fn len(&self) -> usize {
-        self.lock_shards().iter().map(|shard| shard.len()).sum()
+        self.lock_shards().iter().map(|shard| shard.deref().len()).sum()
     }
 }
 

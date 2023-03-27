@@ -437,6 +437,7 @@ cfg_if! {
                 let panic: Lock<Option<_>> = Lock::new(None);
                 t.into_par_iter().for_each(|i| if let Err(p) = catch_unwind(AssertUnwindSafe(|| for_each(i))) {
                     let mut l = panic.lock();
+                    let l = l .deref_mut();
                     if l.is_none() {
                         *l = Some(p)
                     }
@@ -480,6 +481,7 @@ cfg_if! {
                         Ok(r) => Some(r),
                         Err(p) => {
                             let mut l = panic.lock();
+                            let l = l.deref_mut();
                             if l.is_none() {
                                 *l = Some(p);
                             }
@@ -599,7 +601,7 @@ pub struct Lock<T> {
 impl<T: Debug> Debug for Lock<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self.try_lock() {
-            Some(guard) => f.debug_struct("Lock").field("data", &&*guard).finish(),
+            Some(guard) => f.debug_struct("Lock").field("data", guard.deref()).finish(),
             None => {
                 struct LockedPlaceholder;
                 impl Debug for LockedPlaceholder {
@@ -740,7 +742,7 @@ impl<T: Default> Default for Lock<T> {
 impl<T: Clone> Clone for Lock<T> {
     #[inline]
     fn clone(&self) -> Self {
-        Lock::new(self.borrow().clone())
+        Lock::new(self.borrow().deref().clone())
     }
 }
 
@@ -753,16 +755,12 @@ pub struct LockGuard<'a, T> {
     marker: PhantomData<&'a mut T>,
 }
 
-impl<T> const Deref for LockGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
+impl<T> LockGuard<'_, T> {
+    pub const fn deref(&self) -> &T {
         unsafe { &*self.lock.data.get() }
     }
-}
 
-impl<T> const DerefMut for LockGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut T {
+    pub const fn deref_mut(&mut self) -> &mut T {
         unsafe { &mut *self.lock.data.get() }
     }
 }
