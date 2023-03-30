@@ -639,12 +639,7 @@ impl Handler {
     ) -> String {
         let inner = self.inner.borrow();
         let args = crate::translation::to_fluent_args(args);
-        inner
-            .emitter
-            .translate_message(&message, &args)
-            .map_err(Report::new)
-            .unwrap()
-            .to_string()
+        inner.emitter.translate_message(&message, &args).map_err(Report::new).unwrap().to_string()
     }
 
     // This is here to not allow mutation of flags;

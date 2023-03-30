@@ -76,11 +76,7 @@ impl<T: Default> Sharded<T> {
     }
 
     #[inline]
-    pub fn with_get_shard_by_hash<F: FnOnce(&mut T) -> R, R>(
-        &self,
-        hash: u64,
-        f: F,
-    ) -> R {
+    pub fn with_get_shard_by_hash<F: FnOnce(&mut T) -> R, R>(&self, hash: u64, f: F) -> R {
         if likely(self.single_thread) {
             let shard = &self.shard;
             assert!(!shard.borrow.replace(true));
@@ -89,6 +85,15 @@ impl<T: Default> Sharded<T> {
             r
         } else {
             self.shards[get_shard_index_by_hash(hash)].0.with_mt_lock(f)
+        }
+    }
+
+    #[inline]
+    pub fn get_shard_by_value<K: Hash + ?Sized>(&self, val: &K) -> &Lock<T> {
+        if likely(self.single_thread) {
+            &self.shard
+        } else {
+            &self.shards[get_shard_index_by_hash(make_hash(val))].0
         }
     }
 
