@@ -24,11 +24,13 @@ impl SpannedEventArgRecorder for EventArgRecorder<'_> {
         self.record_arg(event_arg);
 
         let span_arg = crate::with_session_globals(|session_globals| {
-            if let Some(source_map) = &*session_globals.source_map.borrow() {
-                source_map.span_to_embeddable_string(span)
-            } else {
-                format!("{span:?}")
-            }
+            session_globals.source_map.with_borrow(|map| {
+                if let Some(source_map) = map.as_ref() {
+                    source_map.span_to_embeddable_string(span)
+                } else {
+                    format!("{span:?}")
+                }
+            })
         });
         self.record_arg(span_arg);
     }

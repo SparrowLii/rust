@@ -813,7 +813,7 @@ impl<'a> Parser<'a> {
                         Applicability::MachineApplicable
                     },
                 );
-                self.sess.type_ascription_path_suggestions.borrow_mut().insert(sp);
+                self.sess.type_ascription_path_suggestions.lock().deref_mut().insert(sp);
             } else if op_pos.line != next_pos.line && maybe_expected_semicolon {
                 err.span_suggestion(
                     sp,
@@ -2113,7 +2113,7 @@ impl<'a> Parser<'a> {
         };
         let mut err = self.struct_span_err(span, &msg);
         let sp = self.sess.source_map().start_point(self.token.span);
-        if let Some(sp) = self.sess.ambiguous_block_expr_parse.borrow().get(&sp) {
+        if let Some(sp) = self.sess.ambiguous_block_expr_parse.borrow().deref().get(&sp) {
             err.subdiagnostic(ExprParenthesesNeeded::surrounding(*sp));
         }
         err.span_label(span, "expected expression");

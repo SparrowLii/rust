@@ -384,7 +384,7 @@ impl HygieneData {
     }
 
     pub fn with<T, F: FnOnce(&mut HygieneData) -> T>(f: F) -> T {
-        with_session_globals(|session_globals| f(&mut session_globals.hygiene_data.borrow_mut()))
+        with_session_globals(|session_globals| session_globals.hygiene_data.with_lock(f))
     }
 
     #[inline]
@@ -1192,8 +1192,8 @@ pub struct HygieneEncodeContext {
 impl HygieneEncodeContext {
     /// Record the fact that we need to serialize the corresponding `ExpnData`.
     pub fn schedule_expn_data_for_encoding(&self, expn: ExpnId) {
-        if !self.serialized_expns.lock().contains(&expn) {
-            self.latest_expns.lock().insert(expn);
+        if !self.serialized_expns.with_borrow(|expns| expns.contains(&expn)) {
+            self.latest_expns.with_lock(|expns| expns.insert(expn));
         }
     }
 
@@ -1205,33 +1205,35 @@ impl HygieneEncodeContext {
     ) {
         // When we serialize a `SyntaxContextData`, we may end up serializing
         // a `SyntaxContext` that we haven't seen before
-        while !self.latest_ctxts.lock().is_empty() || !self.latest_expns.lock().is_empty() {
+        while !self.latest_ctxts.with_borrow(|ctxts| ctxts.is_empty())
+            || !self.latest_expns.with_borrow(|expns| expns.is_empty())
+        {
             debug!(
                 "encode_hygiene: Serializing a round of {:?} SyntaxContextDatas: {:?}",
-                self.latest_ctxts.lock().len(),
+                self.latest_ctxts.with_borrow(|ctxts| ctxts.len()),
                 self.latest_ctxts
             );
 
             // Consume the current round of SyntaxContexts.
             // Drop the lock() temporary early
-            let latest_ctxts = { std::mem::take(&mut *self.latest_ctxts.lock()) };
+            let latest_ctxts = self.latest_ctxts.with_lock(|ctxts| std::mem::take(ctxts));
 
             // It's fine to iterate over a HashMap, because the serialization
             // of the table that we insert data into doesn't depend on insertion
             // order
             #[allow(rustc::potential_query_instability)]
             for_all_ctxts_in(latest_ctxts.into_iter(), |index, ctxt, data| {
-                if self.serialized_ctxts.lock().insert(ctxt) {
+                if self.serialized_ctxts.with_lock(|ctxts| ctxts.insert(ctxt)) {
                     encode_ctxt(encoder, index, data);
                 }
             });
 
-            let latest_expns = { std::mem::take(&mut *self.latest_expns.lock()) };
+            let latest_expns = self.latest_expns.with_lock(|expns| std::mem::take(expns));
 
             // Same as above, this is fine as we are inserting into a order-independent hashset
             #[allow(rustc::potential_query_instability)]
             for_all_expns_in(latest_expns.into_iter(), |expn, data, hash| {
-                if self.serialized_expns.lock().insert(expn) {
+                if self.serialized_expns.with_lock(|expns| expns.insert(expn)) {
                     encode_expn(encoder, expn, data, hash);
                 }
             });
@@ -1336,7 +1338,9 @@ pub fn decode_syntax_context<D: Decoder, F: FnOnce(&mut D, u32) -> SyntaxContext
 
     // Ensure that the lock() temporary is dropped early
     {
-        if let Some(ctxt) = outer_ctxts.lock().get(raw_id as usize).copied().flatten() {
+        if let Some(ctxt) =
+            outer_ctxts.with_borrow(|ctxts| ctxts.get(raw_id as usize).copied().flatten())
+        {
             return ctxt;
         }
     }
@@ -1355,14 +1359,15 @@ pub fn decode_syntax_context<D: Decoder, F: FnOnce(&mut D, u32) -> SyntaxContext
             opaque_and_semitransparent: SyntaxContext::root(),
             dollar_crate_name: kw::Empty,
         });
-        let mut ctxts = outer_ctxts.lock();
-        let new_len = raw_id as usize + 1;
-        if ctxts.len() < new_len {
-            ctxts.resize(new_len, None);
-        }
-        ctxts[raw_id as usize] = Some(new_ctxt);
-        drop(ctxts);
-        new_ctxt
+        outer_ctxts.with_lock(|ctxts| {
+            let new_len = raw_id as usize + 1;
+            if ctxts.len() < new_len {
+                ctxts.resize(new_len, None);
+            }
+            ctxts[raw_id as usize] = Some(new_ctxt);
+            drop(ctxts);
+            new_ctxt
+        })
     });
 
     // Don't try to decode data while holding the lock, since we need to
@@ -1439,8 +1444,8 @@ pub fn raw_encode_syntax_context<E: Encoder>(
     context: &HygieneEncodeContext,
     e: &mut E,
 ) {
-    if !context.serialized_ctxts.lock().contains(&ctxt) {
-        context.latest_ctxts.lock().insert(ctxt);
+    if !context.serialized_ctxts.with_borrow(|ctxts| ctxts.contains(&ctxt)) {
+        context.latest_ctxts.with_lock(|ctxts| ctxts.insert(ctxt));
     }
     ctxt.0.encode(e);
 }

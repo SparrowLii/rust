@@ -459,48 +459,51 @@ impl<K: DepKind> DepGraph<K> {
     pub fn read_index(&self, dep_node_index: DepNodeIndex) {
         if let Some(ref data) = self.data {
             K::read_deps(|task_deps| {
-                let mut task_deps = match task_deps {
-                    TaskDepsRef::Allow(deps) => deps.lock(),
+                match task_deps {
+                    TaskDepsRef::Allow(deps) => deps.with_lock(|task_deps| {
+                        if cfg!(debug_assertions) {
+                            data.current.total_read_count.fetch_add(1, Relaxed);
+                        }
+
+                        // As long as we only have a low number of reads we can avoid doing a hash
+                        // insert and potentially allocating/reallocating the hashmap
+                        let new_read = if task_deps.reads.len() < TASK_DEPS_READS_CAP {
+                            task_deps.reads.iter().all(|other| *other != dep_node_index)
+                        } else {
+                            task_deps.read_set.insert(dep_node_index)
+                        };
+                        if new_read {
+                            task_deps.reads.push(dep_node_index);
+                            if task_deps.reads.len() == TASK_DEPS_READS_CAP {
+                                // Fill `read_set` with what we have so far so we can use the hashset
+                                // next time
+                                task_deps.read_set.extend(task_deps.reads.iter().copied());
+                            }
+
+                            #[cfg(debug_assertions)]
+                            {
+                                if let Some(target) = task_deps.node {
+                                    if let Some(ref forbidden_edge) = data.current.forbidden_edge {
+                                        let src =
+                                            forbidden_edge.index_to_node.lock()[&dep_node_index];
+                                        if forbidden_edge.test(&src, &target) {
+                                            panic!(
+                                                "forbidden edge {:?} -> {:?} created",
+                                                src, target
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else if cfg!(debug_assertions) {
+                            data.current.total_duplicate_read_count.fetch_add(1, Relaxed);
+                        }
+                    }),
                     TaskDepsRef::Ignore => return,
                     TaskDepsRef::Forbid => {
                         panic!("Illegal read of: {dep_node_index:?}")
                     }
                 };
-                let task_deps = &mut *task_deps;
-
-                if cfg!(debug_assertions) {
-                    data.current.total_read_count.fetch_add(1, Relaxed);
-                }
-
-                // As long as we only have a low number of reads we can avoid doing a hash
-                // insert and potentially allocating/reallocating the hashmap
-                let new_read = if task_deps.reads.len() < TASK_DEPS_READS_CAP {
-                    task_deps.reads.iter().all(|other| *other != dep_node_index)
-                } else {
-                    task_deps.read_set.insert(dep_node_index)
-                };
-                if new_read {
-                    task_deps.reads.push(dep_node_index);
-                    if task_deps.reads.len() == TASK_DEPS_READS_CAP {
-                        // Fill `read_set` with what we have so far so we can use the hashset
-                        // next time
-                        task_deps.read_set.extend(task_deps.reads.iter().copied());
-                    }
-
-                    #[cfg(debug_assertions)]
-                    {
-                        if let Some(target) = task_deps.node {
-                            if let Some(ref forbidden_edge) = data.current.forbidden_edge {
-                                let src = forbidden_edge.index_to_node.lock()[&dep_node_index];
-                                if forbidden_edge.test(&src, &target) {
-                                    panic!("forbidden edge {:?} -> {:?} created", src, target)
-                                }
-                            }
-                        }
-                    }
-                } else if cfg!(debug_assertions) {
-                    data.current.total_duplicate_read_count.fetch_add(1, Relaxed);
-                }
             })
         }
     }
@@ -555,7 +558,9 @@ impl<K: DepKind> DepGraph<K> {
 
             let mut edges = SmallVec::new();
             K::read_deps(|task_deps| match task_deps {
-                TaskDepsRef::Allow(deps) => edges.extend(deps.lock().reads.iter().copied()),
+                TaskDepsRef::Allow(deps) => {
+                    deps.with_borrow(|deps| edges.extend(deps.reads.iter().copied()))
+                }
                 TaskDepsRef::Ignore => {} // During HIR lowering, we have no dependencies.
                 TaskDepsRef::Forbid => {
                     panic!("Cannot summarize when dependencies are not recorded.")
@@ -605,7 +610,7 @@ impl<K: DepKind> DepGraphData<K> {
     #[inline]
     pub fn dep_node_index_of_opt(&self, dep_node: &DepNode<K>) -> Option<DepNodeIndex> {
         if let Some(prev_index) = self.previous.node_to_index_opt(dep_node) {
-            self.current.prev_index_to_index.lock()[prev_index]
+            self.current.prev_index_to_index.with_borrow(|nodes| nodes[prev_index])
         } else {
             self.current
                 .new_node_to_index
@@ -645,7 +650,7 @@ impl<K: DepKind> DepGraphData<K> {
     }
 
     pub fn mark_debug_loaded_from_disk(&self, dep_node: DepNode<K>) {
-        self.debug_loaded_from_disk.lock().insert(dep_node);
+        self.debug_loaded_from_disk.with_lock(|node| node.insert(dep_node));
     }
 }
 
@@ -668,7 +673,11 @@ impl<K: DepKind> DepGraph<K> {
     }
 
     pub fn debug_was_loaded_from_disk(&self, dep_node: DepNode<K>) -> bool {
-        self.data.as_ref().unwrap().debug_loaded_from_disk.lock().contains(&dep_node)
+        self.data
+            .as_ref()
+            .unwrap()
+            .debug_loaded_from_disk
+            .with_borrow(|node| node.contains(&dep_node))
     }
 
     #[inline(always)]
@@ -678,15 +687,15 @@ impl<K: DepKind> DepGraph<K> {
     {
         let dep_node_debug = &self.data.as_ref().unwrap().dep_node_debug;
 
-        if dep_node_debug.borrow().contains_key(&dep_node) {
+        if dep_node_debug.with_borrow(|node| node.contains_key(&dep_node)) {
             return;
         }
         let debug_str = self.with_ignore(debug_str_gen);
-        dep_node_debug.borrow_mut().insert(dep_node, debug_str);
+        dep_node_debug.with_lock(|node| node.insert(dep_node, debug_str));
     }
 
     pub fn dep_node_debug_str(&self, dep_node: DepNode<K>) -> Option<String> {
-        self.data.as_ref()?.dep_node_debug.borrow().get(&dep_node).cloned()
+        self.data.as_ref()?.dep_node_debug.with_borrow(|node| node.get(&dep_node).cloned())
     }
 
     fn node_color(&self, dep_node: &DepNode<K>) -> Option<DepNodeColor> {
@@ -1219,17 +1228,22 @@ impl<K: DepKind> CurrentDepGraph<K> {
 
                     // This is a green node: it existed in the previous compilation,
                     // its query was re-executed, and it has the same result as before.
-                    let mut prev_index_to_index = self.prev_index_to_index.lock();
-
-                    let dep_node_index = match prev_index_to_index[prev_index] {
-                        Some(dep_node_index) => dep_node_index,
-                        None => {
-                            let dep_node_index =
-                                self.encoder.borrow().send(profiler, key, fingerprint, edges);
-                            prev_index_to_index[prev_index] = Some(dep_node_index);
-                            dep_node_index
-                        }
-                    };
+                    let dep_node_index =
+                        self.prev_index_to_index.with_lock(|prev_index_to_index| {
+                            match prev_index_to_index[prev_index] {
+                                Some(dep_node_index) => dep_node_index,
+                                None => {
+                                    let dep_node_index = self.encoder.borrow().send(
+                                        profiler,
+                                        key,
+                                        fingerprint,
+                                        edges,
+                                    );
+                                    prev_index_to_index[prev_index] = Some(dep_node_index);
+                                    dep_node_index
+                                }
+                            }
+                        });
 
                     #[cfg(debug_assertions)]
                     self.record_edge(dep_node_index, key, fingerprint);
@@ -1241,17 +1255,22 @@ impl<K: DepKind> CurrentDepGraph<K> {
 
                     // This is a red node: it existed in the previous compilation, its query
                     // was re-executed, but it has a different result from before.
-                    let mut prev_index_to_index = self.prev_index_to_index.lock();
-
-                    let dep_node_index = match prev_index_to_index[prev_index] {
-                        Some(dep_node_index) => dep_node_index,
-                        None => {
-                            let dep_node_index =
-                                self.encoder.borrow().send(profiler, key, fingerprint, edges);
-                            prev_index_to_index[prev_index] = Some(dep_node_index);
-                            dep_node_index
-                        }
-                    };
+                    let dep_node_index =
+                        self.prev_index_to_index.with_lock(|prev_index_to_index| {
+                            match prev_index_to_index[prev_index] {
+                                Some(dep_node_index) => dep_node_index,
+                                None => {
+                                    let dep_node_index = self.encoder.borrow().send(
+                                        profiler,
+                                        key,
+                                        fingerprint,
+                                        edges,
+                                    );
+                                    prev_index_to_index[prev_index] = Some(dep_node_index);
+                                    dep_node_index
+                                }
+                            }
+                        });
 
                     #[cfg(debug_assertions)]
                     self.record_edge(dep_node_index, key, fingerprint);
@@ -1266,17 +1285,17 @@ impl<K: DepKind> CurrentDepGraph<K> {
                 // session, its query was re-executed, but it doesn't compute a result hash
                 // (i.e. it represents a `no_hash` query), so we have no way of determining
                 // whether or not the result was the same as before.
-                let mut prev_index_to_index = self.prev_index_to_index.lock();
-
-                let dep_node_index = match prev_index_to_index[prev_index] {
-                    Some(dep_node_index) => dep_node_index,
-                    None => {
-                        let dep_node_index =
-                            self.encoder.borrow().send(profiler, key, Fingerprint::ZERO, edges);
-                        prev_index_to_index[prev_index] = Some(dep_node_index);
-                        dep_node_index
+                let dep_node_index = self.prev_index_to_index.with_lock(|prev_index_to_index| {
+                    match prev_index_to_index[prev_index] {
+                        Some(dep_node_index) => dep_node_index,
+                        None => {
+                            let dep_node_index =
+                                self.encoder.borrow().send(profiler, key, Fingerprint::ZERO, edges);
+                            prev_index_to_index[prev_index] = Some(dep_node_index);
+                            dep_node_index
+                        }
                     }
-                };
+                });
 
                 #[cfg(debug_assertions)]
                 self.record_edge(dep_node_index, key, Fingerprint::ZERO);
@@ -1304,25 +1323,26 @@ impl<K: DepKind> CurrentDepGraph<K> {
     ) -> DepNodeIndex {
         self.debug_assert_not_in_new_nodes(prev_graph, prev_index);
 
-        let mut prev_index_to_index = self.prev_index_to_index.lock();
-
-        match prev_index_to_index[prev_index] {
-            Some(dep_node_index) => dep_node_index,
-            None => {
-                let key = prev_graph.index_to_node(prev_index);
-                let edges = prev_graph
-                    .edge_targets_from(prev_index)
-                    .iter()
-                    .map(|i| prev_index_to_index[*i].unwrap())
-                    .collect();
-                let fingerprint = prev_graph.fingerprint_by_index(prev_index);
-                let dep_node_index = self.encoder.borrow().send(profiler, key, fingerprint, edges);
-                prev_index_to_index[prev_index] = Some(dep_node_index);
-                #[cfg(debug_assertions)]
-                self.record_edge(dep_node_index, key, fingerprint);
-                dep_node_index
+        self.prev_index_to_index.with_lock(|prev_index_to_index| {
+            match prev_index_to_index[prev_index] {
+                Some(dep_node_index) => dep_node_index,
+                None => {
+                    let key = prev_graph.index_to_node(prev_index);
+                    let edges = prev_graph
+                        .edge_targets_from(prev_index)
+                        .iter()
+                        .map(|i| prev_index_to_index[*i].unwrap())
+                        .collect();
+                    let fingerprint = prev_graph.fingerprint_by_index(prev_index);
+                    let dep_node_index =
+                        self.encoder.borrow().send(profiler, key, fingerprint, edges);
+                    prev_index_to_index[prev_index] = Some(dep_node_index);
+                    #[cfg(debug_assertions)]
+                    self.record_edge(dep_node_index, key, fingerprint);
+                    dep_node_index
+                }
             }
-        }
+        })
     }
 
     #[inline]

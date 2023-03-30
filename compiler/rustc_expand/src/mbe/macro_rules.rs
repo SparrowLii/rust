@@ -331,7 +331,7 @@ pub(super) fn try_match_macro<'matcher, T: Tracker<'matcher>>(
         // This is used so that if a matcher is not `Success(..)`ful,
         // then the spans which became gated when parsing the unsuccessful matcher
         // are not recorded. On the first `Success(..)`ful matcher, the spans are merged.
-        let mut gated_spans_snapshot = mem::take(&mut *sess.gated_spans.spans.borrow_mut());
+        let mut gated_spans_snapshot = sess.gated_spans.spans.with_lock(|spans| mem::take(spans));
 
         let result = tt_parser.parse_tt(&mut Cow::Borrowed(&parser), lhs, track);
 
@@ -364,7 +364,7 @@ pub(super) fn try_match_macro<'matcher, T: Tracker<'matcher>>(
 
         // The matcher was not `Success(..)`ful.
         // Restore to the state before snapshotting and maybe try again.
-        mem::swap(&mut gated_spans_snapshot, &mut sess.gated_spans.spans.borrow_mut());
+        sess.gated_spans.spans.with_lock(|spans| mem::swap(&mut gated_spans_snapshot, spans));
     }
 
     Err(CanRetry::Yes)

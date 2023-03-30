@@ -106,16 +106,16 @@ where
 
     #[inline(always)]
     fn lookup(&self, _key: &()) -> Option<(V, DepNodeIndex)> {
-        *self.cache.lock()
+        self.cache.with_lock(|cache| *cache)
     }
 
     #[inline]
     fn complete(&self, _key: (), value: V, index: DepNodeIndex) {
-        *self.cache.lock() = Some((value, index));
+        self.cache.with_lock(|cache| *cache = Some((value, index)));
     }
 
     fn iter(&self, f: &mut dyn FnMut(&Self::Key, &Self::Value, DepNodeIndex)) {
-        self.cache.lock().as_ref().map(|value| f(&(), &value.0, value.1));
+        self.cache.with_lock(|cache| cache.as_ref().map(|value| f(&(), &value.0, value.1)));
     }
 }
 

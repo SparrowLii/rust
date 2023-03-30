@@ -1953,35 +1953,36 @@ impl Interner {
 
     #[inline]
     fn intern(&self, string: &str) -> Symbol {
-        let mut inner = self.0.lock();
-        if let Some(&name) = inner.names.get(string) {
-            return name;
-        }
+        self.0.with_lock(|inner| {
+            if let Some(&name) = inner.names.get(string) {
+                return name;
+            }
 
-        let name = Symbol::new(inner.strings.len() as u32);
+            let name = Symbol::new(inner.strings.len() as u32);
 
-        // SAFETY: we convert from `&str` to `&[u8]`, clone it into the arena,
-        // and immediately convert the clone back to `&[u8]`, all because there
-        // is no `inner.arena.alloc_str()` method. This is clearly safe.
-        let string: &str =
-            unsafe { str::from_utf8_unchecked(inner.arena.alloc_slice(string.as_bytes())) };
+            // SAFETY: we convert from `&str` to `&[u8]`, clone it into the arena,
+            // and immediately convert the clone back to `&[u8]`, all because there
+            // is no `inner.arena.alloc_str()` method. This is clearly safe.
+            let string: &str =
+                unsafe { str::from_utf8_unchecked(inner.arena.alloc_slice(string.as_bytes())) };
 
-        // SAFETY: we can extend the arena allocation to `'static` because we
-        // only access these while the arena is still alive.
-        let string: &'static str = unsafe { &*(string as *const str) };
-        inner.strings.push(string);
+            // SAFETY: we can extend the arena allocation to `'static` because we
+            // only access these while the arena is still alive.
+            let string: &'static str = unsafe { &*(string as *const str) };
+            inner.strings.push(string);
 
-        // This second hash table lookup can be avoided by using `RawEntryMut`,
-        // but this code path isn't hot enough for it to be worth it. See
-        // #91445 for details.
-        inner.names.insert(string, name);
-        name
+            // This second hash table lookup can be avoided by using `RawEntryMut`,
+            // but this code path isn't hot enough for it to be worth it. See
+            // #91445 for details.
+            inner.names.insert(string, name);
+            name
+        })
     }
 
     // Get the symbol as a string. `Symbol::as_str()` should be used in
     // preference to this function.
     fn get(&self, symbol: Symbol) -> &str {
-        self.0.lock().strings[symbol.0.as_usize()]
+        self.0.with_borrow(|inner| inner.strings[symbol.0.as_usize()])
     }
 }
 

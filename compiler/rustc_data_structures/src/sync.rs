@@ -755,12 +755,16 @@ pub struct LockGuard<'a, T> {
     marker: PhantomData<&'a mut T>,
 }
 
-impl<T> LockGuard<'_, T> {
-    pub const fn deref(&self) -> &T {
+impl<T> const Deref for LockGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
         unsafe { &*self.lock.data.get() }
     }
+}
 
-    pub const fn deref_mut(&mut self) -> &mut T {
+impl<T> const DerefMut for LockGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
         unsafe { &mut *self.lock.data.get() }
     }
 }

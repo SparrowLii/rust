@@ -233,7 +233,8 @@ pub enum MetadataKind {
 
 impl Session {
     pub fn miri_unleashed_feature(&self, span: Span, feature_gate: Option<Symbol>) {
-        self.miri_unleashed_features.lock().push((span, feature_gate));
+        self.miri_unleashed_features
+            .with_lock(|unleashed_features| unleashed_features.push((span, feature_gate)));
     }
 
     pub fn local_crate_source_file(&self) -> Option<PathBuf> {
@@ -242,29 +243,30 @@ impl Session {
     }
 
     fn check_miri_unleashed_features(&self) {
-        let unleashed_features = self.miri_unleashed_features.lock();
-        if !unleashed_features.is_empty() {
-            let mut must_err = false;
-            // Create a diagnostic pointing at where things got unleashed.
-            self.emit_warning(errors::SkippingConstChecks {
-                unleashed_features: unleashed_features
-                    .iter()
-                    .map(|(span, gate)| {
-                        gate.map(|gate| {
-                            must_err = true;
-                            errors::UnleashedFeatureHelp::Named { span: *span, gate }
+        self.miri_unleashed_features.with_borrow(|unleashed_features| {
+            if !unleashed_features.is_empty() {
+                let mut must_err = false;
+                // Create a diagnostic pointing at where things got unleashed.
+                self.emit_warning(errors::SkippingConstChecks {
+                    unleashed_features: unleashed_features
+                        .iter()
+                        .map(|(span, gate)| {
+                            gate.map(|gate| {
+                                must_err = true;
+                                errors::UnleashedFeatureHelp::Named { span: *span, gate }
+                            })
+                            .unwrap_or(errors::UnleashedFeatureHelp::Unnamed { span: *span })
                         })
-                        .unwrap_or(errors::UnleashedFeatureHelp::Unnamed { span: *span })
-                    })
-                    .collect(),
-            });
+                        .collect(),
+                });
 
-            // If we should err, make sure we did.
-            if must_err && self.has_errors().is_none() {
-                // We have skipped a feature gate, and not run into other errors... reject.
-                self.emit_err(errors::NotCircumventFeature);
+                // If we should err, make sure we did.
+                if must_err && self.has_errors().is_none() {
+                    // We have skipped a feature gate, and not run into other errors... reject.
+                    self.emit_err(errors::NotCircumventFeature);
+                }
             }
-        }
+        })
     }
 
     /// Invoked all the way at the end to finish off diagnostics printing.
@@ -930,19 +932,20 @@ impl Session {
         if let Some((ref c, _)) = self.opts.unstable_opts.fuel {
             if c == get_crate_name().as_str() {
                 assert_eq!(self.threads(), 1);
-                let mut fuel = self.optimization_fuel.lock();
-                ret = fuel.remaining != 0;
-                if fuel.remaining == 0 && !fuel.out_of_fuel {
-                    if self.diagnostic().can_emit_warnings() {
-                        // We only call `msg` in case we can actually emit warnings.
-                        // Otherwise, this could cause a `delay_good_path_bug` to
-                        // trigger (issue #79546).
-                        self.emit_warning(errors::OptimisationFuelExhausted { msg: msg() });
+                self.optimization_fuel.with_lock(|fuel| {
+                    ret = fuel.remaining != 0;
+                    if fuel.remaining == 0 && !fuel.out_of_fuel {
+                        if self.diagnostic().can_emit_warnings() {
+                            // We only call `msg` in case we can actually emit warnings.
+                            // Otherwise, this could cause a `delay_good_path_bug` to
+                            // trigger (issue #79546).
+                            self.emit_warning(errors::OptimisationFuelExhausted { msg: msg() });
+                        }
+                        fuel.out_of_fuel = true;
+                    } else if fuel.remaining > 0 {
+                        fuel.remaining -= 1;
                     }
-                    fuel.out_of_fuel = true;
-                } else if fuel.remaining > 0 {
-                    fuel.remaining -= 1;
-                }
+                })
             }
         }
         if let Some(ref c) = self.opts.unstable_opts.print_fuel {

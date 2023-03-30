@@ -1540,7 +1540,7 @@ pub(crate) fn make_unclosed_delims_error(
 }
 
 pub fn emit_unclosed_delims(unclosed_delims: &mut Vec<UnmatchedDelim>, sess: &ParseSess) {
-    *sess.reached_eof.borrow_mut() |=
+    *sess.reached_eof.lock() |=
         unclosed_delims.iter().any(|unmatched_delim| unmatched_delim.found_delim.is_none());
     for unmatched in unclosed_delims.drain(..) {
         if let Some(mut e) = make_unclosed_delims_error(unmatched, sess) {
