@@ -779,18 +779,15 @@ unsafe impl<T: ?Sized + Sync> std::marker::Send for MappedReadGuard<'_, T> {}
 unsafe impl<T: ?Sized + Sync> std::marker::Sync for MappedReadGuard<'_, T> {}
 
 impl<'a, T: 'a + ?Sized> MappedReadGuard<'a, T> {
+    #[inline]
     pub fn map<U: ?Sized, F>(s: Self, f: F) -> MappedReadGuard<'a, U>
-        where
-            F: FnOnce(&T) -> &U,
+    where
+        F: FnOnce(&T) -> &U,
     {
         let raw = s.raw;
         let data = f(unsafe { &*s.data });
         std::mem::forget(s);
-        MappedReadGuard {
-            raw,
-            data,
-            marker: PhantomData,
-        }
+        MappedReadGuard { raw, data, marker: PhantomData }
     }
 }
 
@@ -818,9 +815,55 @@ impl<'a, T: 'a + ?Sized> Drop for MappedReadGuard<'a, T> {
     }
 }
 
-//pub use std::cell::RefMut;
-//pub use parking_lot::MappedRwLockReadGuard as MappedReadGuard;
-//pub use parking_lot::MappedRwLockWriteGuard as MappedWriteGuard;
+pub struct MappedWriteGuard<'a, T: ?Sized> {
+    raw: &'a RwLockRaw,
+    data: *mut T,
+    marker: PhantomData<&'a mut T>,
+}
+
+unsafe impl<T: ?Sized + Sync> std::marker::Send for MappedWriteGuard<'_, T> {}
+
+impl<'a, T: 'a + ?Sized> MappedWriteGuard<'a, T> {
+    #[inline]
+    pub fn map<U: ?Sized, F>(s: Self, f: F) -> MappedWriteGuard<'a, U>
+    where
+        F: FnOnce(&mut T) -> &mut U,
+    {
+        let raw = s.raw;
+        let data = f(unsafe { &mut *s.data });
+        std::mem::forget(s);
+        MappedWriteGuard { raw, data, marker: PhantomData }
+    }
+}
+
+impl<'a, T: 'a + ?Sized> Deref for MappedWriteGuard<'a, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        unsafe { &*self.data }
+    }
+}
+
+impl<'a, T: 'a + ?Sized> DerefMut for MappedWriteGuard<'a, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.data }
+    }
+}
+
+impl<'a, T: 'a + ?Sized> Drop for MappedWriteGuard<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        if likely(self.raw.single_thread) {
+            assert_eq!(self.raw.borrow.replace(0), -1);
+        } else {
+            // Safety: An RwLockReadGuard always holds a shared lock.
+            unsafe {
+                self.raw.raw.unlock_exclusive();
+            }
+        }
+    }
+}
 
 pub struct ReadGuard<'a, T> {
     rwlock: &'a RwLock<T>,
@@ -866,6 +909,18 @@ impl<'a, T: 'a> Drop for ReadGuard<'a, T> {
 pub struct WriteGuard<'a, T> {
     rwlock: &'a RwLock<T>,
     marker: PhantomData<&'a mut T>,
+}
+
+impl<'a, T: 'a> WriteGuard<'a, T> {
+    pub fn map<U: ?Sized, F>(s: Self, f: F) -> MappedWriteGuard<'a, U>
+    where
+        F: FnOnce(&mut T) -> &mut U,
+    {
+        let raw = &s.rwlock.raw;
+        let data = f(unsafe { &mut *s.rwlock.data.get() });
+        std::mem::forget(s);
+        MappedWriteGuard { raw, data, marker: PhantomData }
+    }
 }
 
 impl<'a, T: 'a> Deref for WriteGuard<'a, T> {
@@ -917,11 +972,7 @@ impl<T: Debug> Debug for RwLock<T> {
 impl<T: Default> Default for RwLock<T> {
     fn default() -> Self {
         RwLock {
-            raw: RwLockRaw {
-                single_thread: !active(),
-                borrow: Cell::new(0),
-                raw: RawRwLock::INIT,
-            },
+            raw: RwLockRaw { single_thread: !active(), borrow: Cell::new(0), raw: RawRwLock::INIT },
 
             data: UnsafeCell::new(T::default()),
         }
@@ -932,14 +983,9 @@ impl<T> RwLock<T> {
     #[inline(always)]
     pub fn new(inner: T) -> Self {
         RwLock {
-            raw: RwLockRaw {
-                single_thread: !active(),
-                borrow: Cell::new(0),
-                raw: RawRwLock::INIT,
-            },
+            raw: RwLockRaw { single_thread: !active(), borrow: Cell::new(0), raw: RawRwLock::INIT },
 
             data: UnsafeCell::new(inner),
-
         }
     }
 
