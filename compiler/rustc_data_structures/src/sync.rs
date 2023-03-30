@@ -60,7 +60,8 @@ pub use vec::AppendOnlyVec;
 
 mod vec;
 use parking_lot::lock_api::RawMutex as _;
-use parking_lot::RawMutex;
+use parking_lot::lock_api::RawRwLock as _;
+use parking_lot::{RawMutex, RawRwLock};
 
 mod mode {
     use super::Ordering;
@@ -250,15 +251,8 @@ cfg_if! {
 
         pub use std::rc::Rc as Lrc;
         pub use std::rc::Weak as Weak;
-        pub use std::cell::Ref as ReadGuard;
-        pub use std::cell::Ref as MappedReadGuard;
-        pub use std::cell::RefMut as WriteGuard;
-        pub use std::cell::RefMut as MappedWriteGuard;
-        pub use std::cell::RefMut as MappedLockGuard;
 
         pub use std::cell::OnceCell;
-
-        use std::cell::RefCell as InnerRwLock;
 
         pub type MTLockRef<'a, T> = &'a mut MTLock<T>;
 
@@ -303,13 +297,6 @@ cfg_if! {
         pub use std::marker::Send as Send;
         pub use std::marker::Sync as Sync;
 
-        pub use parking_lot::RwLockReadGuard as ReadGuard;
-        pub use parking_lot::MappedRwLockReadGuard as MappedReadGuard;
-        pub use parking_lot::RwLockWriteGuard as WriteGuard;
-        pub use parking_lot::MappedRwLockWriteGuard as MappedWriteGuard;
-
-        pub use parking_lot::MappedMutexGuard as MappedLockGuard;
-
         pub use std::sync::OnceLock as OnceCell;
 
         pub use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU32, AtomicU64};
@@ -348,10 +335,6 @@ cfg_if! {
                 self.lock()
             }
         }
-
-        use parking_lot::RwLock as InnerRwLock;
-
-        use std::thread;
 
         #[inline]
         pub fn join<A, B, RA: DynSend, RB: DynSend>(oper_a: A, oper_b: B) -> (RA, RB)
@@ -517,10 +500,6 @@ cfg_if! {
 
         pub type MetadataRef = OwningRef<Box<dyn Erased + Send + Sync>, [u8]>;
 
-        /// This makes locks panic if they are already held.
-        /// It is only useful when you are running in a single thread
-        const ERROR_CHECKING: bool = false;
-
         #[macro_export]
         macro_rules! rustc_erase_owner {
             ($v:expr) => {{
@@ -590,6 +569,10 @@ impl<K: Eq + Hash, V: Eq, S: BuildHasher> HashMapExt<K, V> for HashMap<K, V, S> 
         self.entry(key).and_modify(|old| assert!(*old == value)).or_insert(value);
     }
 }
+
+/// This makes locks panic if they are already held.
+/// It is only useful when you are running in a single thread
+// const ERROR_CHECKING: bool = false;
 
 pub struct Lock<T> {
     single_thread: bool,
@@ -786,81 +769,291 @@ impl<'a, T> Drop for LockGuard<'a, T> {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct RwLock<T>(InnerRwLock<T>);
+pub struct MappedReadGuard<'a, T: ?Sized> {
+    raw: &'a RwLockRaw,
+    data: *const T,
+    marker: PhantomData<&'a T>,
+}
+
+unsafe impl<T: ?Sized + Sync> std::marker::Send for MappedReadGuard<'_, T> {}
+unsafe impl<T: ?Sized + Sync> std::marker::Sync for MappedReadGuard<'_, T> {}
+
+impl<'a, T: 'a + ?Sized> MappedReadGuard<'a, T> {
+    pub fn map<U: ?Sized, F>(s: Self, f: F) -> MappedReadGuard<'a, U>
+        where
+            F: FnOnce(&T) -> &U,
+    {
+        let raw = s.raw;
+        let data = f(unsafe { &*s.data });
+        std::mem::forget(s);
+        MappedReadGuard {
+            raw,
+            data,
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<'a, T: 'a + ?Sized> Deref for MappedReadGuard<'a, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        unsafe { &*self.data }
+    }
+}
+
+impl<'a, T: 'a + ?Sized> Drop for MappedReadGuard<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        if likely(self.raw.single_thread) {
+            let i = self.raw.borrow.get();
+            debug_assert!(i > 0);
+            self.raw.borrow.set(i - 1);
+        } else {
+            // Safety: An RwLockReadGuard always holds a shared lock.
+            unsafe {
+                self.raw.raw.unlock_shared();
+            }
+        }
+    }
+}
+
+//pub use std::cell::RefMut;
+//pub use parking_lot::MappedRwLockReadGuard as MappedReadGuard;
+//pub use parking_lot::MappedRwLockWriteGuard as MappedWriteGuard;
+
+pub struct ReadGuard<'a, T> {
+    rwlock: &'a RwLock<T>,
+    marker: PhantomData<&'a T>,
+}
+
+impl<'a, T: 'a> ReadGuard<'a, T> {
+    pub fn map<U: ?Sized, F>(s: Self, f: F) -> MappedReadGuard<'a, U>
+    where
+        F: FnOnce(&T) -> &U,
+    {
+        let raw = &s.rwlock.raw;
+        let data = f(unsafe { &*s.rwlock.data.get() });
+        std::mem::forget(s);
+        MappedReadGuard { raw, data, marker: PhantomData }
+    }
+}
+
+impl<'a, T: 'a> Deref for ReadGuard<'a, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        unsafe { &*self.rwlock.data.get() }
+    }
+}
+
+impl<'a, T: 'a> Drop for ReadGuard<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        if likely(self.rwlock.raw.single_thread) {
+            let i = self.rwlock.raw.borrow.get();
+            debug_assert!(i > 0);
+            self.rwlock.raw.borrow.set(i - 1);
+        } else {
+            // Safety: An RwLockReadGuard always holds a shared lock.
+            unsafe {
+                self.rwlock.raw.raw.unlock_shared();
+            }
+        }
+    }
+}
+
+pub struct WriteGuard<'a, T> {
+    rwlock: &'a RwLock<T>,
+    marker: PhantomData<&'a mut T>,
+}
+
+impl<'a, T: 'a> Deref for WriteGuard<'a, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        unsafe { &*self.rwlock.data.get() }
+    }
+}
+
+impl<'a, T: 'a> DerefMut for WriteGuard<'a, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.rwlock.data.get() }
+    }
+}
+
+impl<'a, T: 'a> Drop for WriteGuard<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        if likely(self.rwlock.raw.single_thread) {
+            assert_eq!(self.rwlock.raw.borrow.replace(0), -1);
+        } else {
+            // Safety: An RwLockWriteGuard always holds an exclusive lock.
+            unsafe {
+                self.rwlock.raw.raw.unlock_exclusive();
+            }
+        }
+    }
+}
+
+struct RwLockRaw {
+    single_thread: bool,
+    borrow: Cell<isize>,
+    raw: RawRwLock,
+}
+
+pub struct RwLock<T> {
+    raw: RwLockRaw,
+    data: UnsafeCell<T>,
+}
+
+impl<T: Debug> Debug for RwLock<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lock").field("data", self.read().deref()).finish()
+    }
+}
+
+impl<T: Default> Default for RwLock<T> {
+    fn default() -> Self {
+        RwLock {
+            raw: RwLockRaw {
+                single_thread: !active(),
+                borrow: Cell::new(0),
+                raw: RawRwLock::INIT,
+            },
+
+            data: UnsafeCell::new(T::default()),
+        }
+    }
+}
 
 impl<T> RwLock<T> {
     #[inline(always)]
     pub fn new(inner: T) -> Self {
-        RwLock(InnerRwLock::new(inner))
+        RwLock {
+            raw: RwLockRaw {
+                single_thread: !active(),
+                borrow: Cell::new(0),
+                raw: RawRwLock::INIT,
+            },
+
+            data: UnsafeCell::new(inner),
+
+        }
     }
 
     #[inline(always)]
     pub fn into_inner(self) -> T {
-        self.0.into_inner()
+        self.data.into_inner()
     }
 
     #[inline(always)]
     pub fn get_mut(&mut self) -> &mut T {
-        self.0.get_mut()
+        self.data.get_mut()
     }
 
-    #[cfg(not(parallel_compiler))]
-    #[inline(always)]
-    #[track_caller]
-    pub fn read(&self) -> ReadGuard<'_, T> {
-        self.0.borrow()
+    #[inline(never)]
+    fn mt_read(&self) -> ReadGuard<'_, T> {
+        self.raw.raw.lock_shared();
+        ReadGuard { rwlock: self, marker: PhantomData }
     }
 
-    #[cfg(parallel_compiler)]
     #[inline(always)]
     pub fn read(&self) -> ReadGuard<'_, T> {
-        if ERROR_CHECKING {
-            self.0.try_read().expect("lock was already held")
+        if likely(self.raw.single_thread) {
+            let b = self.raw.borrow.get();
+            assert!(b >= 0);
+            self.raw.borrow.set(b + 1);
+            ReadGuard { rwlock: self, marker: PhantomData }
         } else {
-            self.0.read()
+            self.mt_read()
         }
+    }
+
+    #[inline(never)]
+    fn with_mt_read_lock<F: FnOnce(&T) -> R, R>(&self, f: F) -> R {
+        self.raw.raw.lock_shared();
+        let r = unsafe { f(&*self.data.get()) };
+        unsafe {
+            self.raw.raw.unlock_shared();
+        }
+        r
     }
 
     #[inline(always)]
     #[track_caller]
     pub fn with_read_lock<F: FnOnce(&T) -> R, R>(&self, f: F) -> R {
-        f(&*self.read())
-    }
-
-    #[cfg(not(parallel_compiler))]
-    #[inline(always)]
-    pub fn try_write(&self) -> Result<WriteGuard<'_, T>, ()> {
-        self.0.try_borrow_mut().map_err(|_| ())
-    }
-
-    #[cfg(parallel_compiler)]
-    #[inline(always)]
-    pub fn try_write(&self) -> Result<WriteGuard<'_, T>, ()> {
-        self.0.try_write().ok_or(())
-    }
-
-    #[cfg(not(parallel_compiler))]
-    #[inline(always)]
-    #[track_caller]
-    pub fn write(&self) -> WriteGuard<'_, T> {
-        self.0.borrow_mut()
-    }
-
-    #[cfg(parallel_compiler)]
-    #[inline(always)]
-    pub fn write(&self) -> WriteGuard<'_, T> {
-        if ERROR_CHECKING {
-            self.0.try_write().expect("lock was already held")
+        if likely(self.raw.single_thread) {
+            let b = self.raw.borrow.get();
+            assert!(b >= 0);
+            self.raw.borrow.set(b + 1);
+            let r = unsafe { f(&*self.data.get()) };
+            self.raw.borrow.set(b);
+            r
         } else {
-            self.0.write()
+            self.with_mt_read_lock(f)
+        }
+    }
+
+    #[inline(always)]
+    pub fn try_write(&self) -> Result<WriteGuard<'_, T>, ()> {
+        if likely(self.raw.single_thread) {
+            let b = self.raw.borrow.get();
+            if b != 0 {
+                Err(())
+            } else {
+                self.raw.borrow.set(-1);
+                Ok(WriteGuard { rwlock: self, marker: PhantomData })
+            }
+        } else {
+            if self.raw.raw.try_lock_exclusive() {
+                Ok(WriteGuard { rwlock: self, marker: PhantomData })
+            } else {
+                Err(())
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn mt_write(&self) -> WriteGuard<'_, T> {
+        self.raw.raw.lock_exclusive();
+        WriteGuard { rwlock: self, marker: PhantomData }
+    }
+
+    #[inline(always)]
+    pub fn write(&self) -> WriteGuard<'_, T> {
+        if likely(self.raw.single_thread) {
+            assert_eq!(self.raw.borrow.replace(-1), 0);
+            WriteGuard { rwlock: self, marker: PhantomData }
+        } else {
+            self.mt_write()
+        }
+    }
+
+    #[inline(never)]
+    pub fn with_mt_write_lock<F: FnOnce(&mut T) -> R, R>(&self, f: F) -> R {
+        self.raw.raw.lock_exclusive();
+        unsafe {
+            let r = f(&mut *self.data.get());
+            self.raw.raw.unlock_exclusive();
+            r
         }
     }
 
     #[inline(always)]
     #[track_caller]
     pub fn with_write_lock<F: FnOnce(&mut T) -> R, R>(&self, f: F) -> R {
-        f(&mut *self.write())
+        if likely(self.raw.single_thread) {
+            let b = self.raw.borrow.get();
+            assert!(b >= 0);
+            self.raw.borrow.set(b + 1);
+            let r = unsafe { f(&mut *self.data.get()) };
+            self.raw.borrow.set(b);
+            r
+        } else {
+            self.with_mt_write_lock(f)
+        }
     }
 
     #[inline(always)]
@@ -875,13 +1068,6 @@ impl<T> RwLock<T> {
         self.write()
     }
 
-    #[cfg(not(parallel_compiler))]
-    #[inline(always)]
-    pub fn leak(&self) -> &T {
-        ReadGuard::leak(self.read())
-    }
-
-    #[cfg(parallel_compiler)]
     #[inline(always)]
     pub fn leak(&self) -> &T {
         let guard = self.read();
@@ -890,6 +1076,10 @@ impl<T> RwLock<T> {
         ret
     }
 }
+
+// just for speed test
+unsafe impl<T: Send> std::marker::Send for RwLock<T> {}
+unsafe impl<T: Send + Sync> std::marker::Sync for RwLock<T> {}
 
 // FIXME: Probably a bad idea
 impl<T: Clone> Clone for RwLock<T> {
@@ -941,34 +1131,30 @@ impl<T> Deref for WorkerLocal<T> {
 // Just for speed test
 unsafe impl<T: Send> std::marker::Sync for WorkerLocal<T> {}
 
+use std::thread;
+
 /// A type which only allows its inner value to be used in one thread.
 /// It will panic if it is used on multiple threads.
 #[derive(Debug)]
 pub struct OneThread<T> {
-    #[cfg(parallel_compiler)]
+    single_thread: bool,
     thread: thread::ThreadId,
     inner: T,
 }
 
-#[cfg(parallel_compiler)]
+// just for speed test now
 unsafe impl<T> std::marker::Sync for OneThread<T> {}
-#[cfg(parallel_compiler)]
 unsafe impl<T> std::marker::Send for OneThread<T> {}
 
 impl<T> OneThread<T> {
     #[inline(always)]
     fn check(&self) {
-        #[cfg(parallel_compiler)]
-        assert_eq!(thread::current().id(), self.thread);
+        assert!(self.single_thread || thread::current().id() == self.thread);
     }
 
     #[inline(always)]
     pub fn new(inner: T) -> Self {
-        OneThread {
-            #[cfg(parallel_compiler)]
-            thread: thread::current().id(),
-            inner,
-        }
+        OneThread { single_thread: !active(), thread: thread::current().id(), inner }
     }
 
     #[inline(always)]
