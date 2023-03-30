@@ -185,7 +185,9 @@ impl<K: DepKind> EncoderState<K> {
 
         if let Some(record_graph) = &record_graph {
             // Do not ICE when a query is called from within `with_query`.
-            record_graph.with_lock(|record_graph| record_graph.push(index, node.node, &node.edges))
+            if let Some(record_graph) = &mut record_graph.try_lock() {
+                record_graph.push(index, node.node, &node.edges);
+            }
         };
 
         if let Some(stats) = &mut self.stats {
