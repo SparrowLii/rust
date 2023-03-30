@@ -175,7 +175,7 @@ impl<'a> StringReader<'a> {
                     if !sym.can_be_raw() {
                         self.sess.emit_err(errors::CannotBeRawIdent { span, ident: sym });
                     }
-                    self.sess.raw_identifier_spans.borrow_mut().push(span);
+                    self.sess.raw_identifier_spans.lock().push(span);
                     token::Ident(sym, true)
                 }
                 rustc_lexer::TokenKind::UnknownPrefix => {
@@ -197,7 +197,7 @@ impl<'a> StringReader<'a> {
                 {
                     let sym = nfc_normalize(self.str_from(start));
                     let span = self.mk_sp(start, self.pos);
-                    self.sess.bad_unicode_identifiers.borrow_mut().entry(sym).or_default()
+                    self.sess.bad_unicode_identifiers.lock().entry(sym).or_default()
                         .push(span);
                     token::Ident(sym, false)
                 }

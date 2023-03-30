@@ -1012,13 +1012,13 @@ impl<D: Decoder> Decodable<D> for Span {
 /// we fall back to printing the raw `Span` field values.
 pub fn with_source_map<T, F: FnOnce() -> T>(source_map: Lrc<SourceMap>, f: F) -> T {
     with_session_globals(|session_globals| {
-        *session_globals.source_map.borrow_mut() = Some(source_map);
+        session_globals.source_map.with_lock(|map| *map = Some(source_map));
     });
     struct ClearSourceMap;
     impl Drop for ClearSourceMap {
         fn drop(&mut self) {
             with_session_globals(|session_globals| {
-                session_globals.source_map.borrow_mut().take();
+                session_globals.source_map.with_lock(|map| map.take());
             });
         }
     }
@@ -1525,8 +1525,8 @@ impl SourceFile {
                 assert_eq!(*num_diffs, raw_diffs.len() / *bytes_per_diff);
                 match *bytes_per_diff {
                     1 => {
-                        lines.extend(*raw_diffs.into_iter().map(|diff| {
-                            line_start = line_start + BytePos(diff as u32);
+                        lines.extend(raw_diffs.into_iter().map(|diff| {
+                            line_start = line_start + BytePos(*diff as u32);
                             line_start
                         }));
                     }
@@ -1578,7 +1578,7 @@ impl SourceFile {
         F: FnOnce() -> Option<String>,
     {
         if matches!(
-            *self.external_src.borrow().deref(),
+            *self.external_src.borrow(),
             ExternalSource::Foreign { kind: ExternalSourceKind::AbsentOk, .. }
         ) {
             let src = get_src();
@@ -1586,7 +1586,7 @@ impl SourceFile {
             // Check that no-one else have provided the source while we were getting it
             if let ExternalSource::Foreign {
                 kind: src_kind @ ExternalSourceKind::AbsentOk, ..
-            } = external_src.deref_mut()
+            } = &mut *external_src
             {
                 if let Some(mut src) = src {
                     // The src_hash needs to be computed on the pre-normalized src.
@@ -1601,7 +1601,7 @@ impl SourceFile {
 
                 false
             } else {
-                self.src.is_some() || external_src.deref().get_source().is_some()
+                self.src.is_some() || external_src.get_source().is_some()
             }
         } else {
             self.src.is_some() || self.external_src.with_borrow(|src| src.get_source().is_some())
@@ -1630,10 +1630,14 @@ impl SourceFile {
 
         if let Some(ref src) = self.src {
             Some(Cow::from(get_until_newline(src, begin)))
-        } else if let Some(src) = self.external_src.with_borrow(|src| src.get_source()) {
-            Some(Cow::Owned(String::from(get_until_newline(src, begin))))
         } else {
-            None
+            self.external_src.with_borrow(|src| {
+                if let Some(src) = src.get_source() {
+                    Some(Cow::Owned(String::from(get_until_newline(src, begin))))
+                } else {
+                    None
+                }
+            })
         }
     }
 

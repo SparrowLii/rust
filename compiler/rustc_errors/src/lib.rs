@@ -639,7 +639,12 @@ impl Handler {
     ) -> String {
         let inner = self.inner.borrow();
         let args = crate::translation::to_fluent_args(args);
-        inner.emitter.translate_message(&message, &args).map_err(Report::new).unwrap().to_string()
+        inner
+            .emitter
+            .translate_message(&message, &args)
+            .map_err(Report::new)
+            .unwrap()
+            .to_string()
     }
 
     // This is here to not allow mutation of flags;
@@ -685,12 +690,14 @@ impl Handler {
     }
 
     pub fn has_stashed_diagnostic(&self, span: Span, key: StashKey) -> bool {
-        self.inner.borrow().stashed_diagnostics.get(&(span.with_parent(None), key)).is_some()
+        self.inner.with_borrow(|inner| {
+            inner.stashed_diagnostics.get(&(span.with_parent(None), key)).is_some()
+        })
     }
 
     /// Emit all stashed diagnostics.
     pub fn emit_stashed_diagnostics(&self) -> Option<ErrorGuaranteed> {
-        self.inner.borrow_mut().emit_stashed_diagnostics()
+        self.inner.lock().emit_stashed_diagnostics()
     }
 
     /// Construct a builder with the `msg` at the level appropriate for the specific `EmissionGuarantee`.
@@ -992,7 +999,7 @@ impl Handler {
     }
 
     pub fn span_bug(&self, span: impl Into<MultiSpan>, msg: impl Into<DiagnosticMessage>) -> ! {
-        self.inner.borrow_mut().span_bug(span, msg)
+        self.inner.lock().span_bug(span, msg)
     }
 
     /// For documentation on this, see `Session::delay_span_bug`.
@@ -1002,13 +1009,13 @@ impl Handler {
         span: impl Into<MultiSpan>,
         msg: impl Into<DiagnosticMessage>,
     ) -> ErrorGuaranteed {
-        self.inner.borrow_mut().delay_span_bug(span, msg)
+        self.inner.lock().delay_span_bug(span, msg)
     }
 
     // FIXME(eddyb) note the comment inside `impl Drop for HandlerInner`, that's
     // where the explanation of what "good path" is (also, it should be renamed).
     pub fn delay_good_path_bug(&self, msg: impl Into<DiagnosticMessage>) {
-        self.inner.borrow_mut().delay_good_path_bug(msg)
+        self.inner.lock().delay_good_path_bug(msg)
     }
 
     #[track_caller]
@@ -1041,12 +1048,12 @@ impl Handler {
     // NOTE: intentionally doesn't raise an error so rustc_codegen_ssa only reports fatal errors in the main thread
     #[rustc_lint_diagnostics]
     pub fn fatal(&self, msg: impl Into<DiagnosticMessage>) -> FatalError {
-        self.inner.borrow_mut().fatal(msg)
+        self.inner.lock().fatal(msg)
     }
 
     #[rustc_lint_diagnostics]
     pub fn err(&self, msg: impl Into<DiagnosticMessage>) -> ErrorGuaranteed {
-        self.inner.borrow_mut().err(msg)
+        self.inner.lock().err(msg)
     }
 
     #[rustc_lint_diagnostics]
@@ -1061,47 +1068,52 @@ impl Handler {
     }
 
     pub fn bug(&self, msg: impl Into<DiagnosticMessage>) -> ! {
-        self.inner.borrow_mut().bug(msg)
+        self.inner.lock().bug(msg)
     }
 
     #[inline]
     pub fn err_count(&self) -> usize {
-        self.inner.borrow().err_count()
+        self.inner.with_borrow(|inner| inner.err_count())
     }
 
     pub fn has_errors(&self) -> Option<ErrorGuaranteed> {
-        self.inner.borrow().has_errors().then(ErrorGuaranteed::unchecked_claim_error_was_emitted)
+        self.inner.with_borrow(|inner| {
+            inner.has_errors().then(ErrorGuaranteed::unchecked_claim_error_was_emitted)
+        })
     }
 
     pub fn has_errors_or_lint_errors(&self) -> Option<ErrorGuaranteed> {
-        self.inner
-            .borrow()
-            .has_errors_or_lint_errors()
-            .then(ErrorGuaranteed::unchecked_claim_error_was_emitted)
+        self.inner.with_borrow(|inner| {
+            inner
+                .has_errors_or_lint_errors()
+                .then(ErrorGuaranteed::unchecked_claim_error_was_emitted)
+        })
     }
     pub fn has_errors_or_delayed_span_bugs(&self) -> Option<ErrorGuaranteed> {
-        self.inner
-            .borrow()
-            .has_errors_or_delayed_span_bugs()
-            .then(ErrorGuaranteed::unchecked_claim_error_was_emitted)
+        self.inner.with_borrow(|inner| {
+            inner
+                .has_errors_or_delayed_span_bugs()
+                .then(ErrorGuaranteed::unchecked_claim_error_was_emitted)
+        })
     }
     pub fn is_compilation_going_to_fail(&self) -> Option<ErrorGuaranteed> {
-        self.inner
-            .borrow()
-            .is_compilation_going_to_fail()
-            .then(ErrorGuaranteed::unchecked_claim_error_was_emitted)
+        self.inner.with_borrow(|inner| {
+            inner
+                .is_compilation_going_to_fail()
+                .then(ErrorGuaranteed::unchecked_claim_error_was_emitted)
+        })
     }
 
     pub fn print_error_count(&self, registry: &Registry) {
-        self.inner.borrow_mut().print_error_count(registry)
+        self.inner.lock().print_error_count(registry)
     }
 
     pub fn take_future_breakage_diagnostics(&self) -> Vec<Diagnostic> {
-        std::mem::take(&mut self.inner.borrow_mut().future_breakage_diagnostics)
+        std::mem::take(&mut self.inner.lock().future_breakage_diagnostics)
     }
 
     pub fn abort_if_errors(&self) {
-        self.inner.borrow_mut().abort_if_errors()
+        self.inner.lock().abort_if_errors()
     }
 
     /// `true` if we haven't taught a diagnostic with this code already.
@@ -1110,15 +1122,15 @@ impl Handler {
     /// Used to suppress emitting the same error multiple times with extended explanation when
     /// calling `-Zteach`.
     pub fn must_teach(&self, code: &DiagnosticId) -> bool {
-        self.inner.borrow_mut().must_teach(code)
+        self.inner.lock().must_teach(code)
     }
 
     pub fn force_print_diagnostic(&self, db: Diagnostic) {
-        self.inner.borrow_mut().force_print_diagnostic(db)
+        self.inner.lock().force_print_diagnostic(db)
     }
 
     pub fn emit_diagnostic(&self, diagnostic: &mut Diagnostic) -> Option<ErrorGuaranteed> {
-        self.inner.borrow_mut().emit_diagnostic(diagnostic)
+        self.inner.lock().emit_diagnostic(diagnostic)
     }
 
     pub fn emit_err<'a>(&'a self, err: impl IntoDiagnostic<'a>) -> ErrorGuaranteed {
@@ -1198,16 +1210,15 @@ impl Handler {
         mut diag: Diagnostic,
         sp: impl Into<MultiSpan>,
     ) -> Option<ErrorGuaranteed> {
-        let mut inner = self.inner.borrow_mut();
-        inner.emit_diagnostic(diag.set_span(sp))
+        self.inner.lock().emit_diagnostic(diag.set_span(sp))
     }
 
     pub fn emit_artifact_notification(&self, path: &Path, artifact_type: &str) {
-        self.inner.borrow_mut().emit_artifact_notification(path, artifact_type)
+        self.inner.lock().emit_artifact_notification(path, artifact_type)
     }
 
     pub fn emit_future_breakage_report(&self, diags: Vec<Diagnostic>) {
-        self.inner.borrow_mut().emitter.emit_future_breakage_report(diags)
+        self.inner.lock().emitter.emit_future_breakage_report(diags)
     }
 
     pub fn emit_unused_externs(

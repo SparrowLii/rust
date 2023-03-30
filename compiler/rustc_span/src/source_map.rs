@@ -358,7 +358,7 @@ impl SourceMap {
         // form rather than pre-computing the offset into a local variable. The
         // compiler backend can optimize away the repeated computations in a
         // way that won't trigger overflow checks.
-        match &mut *file_local_lines.borrow_mut() {
+        file_local_lines.with_lock(|lines| match lines {
             SourceFileLines::Lines(lines) => {
                 for pos in lines {
                     *pos = (*pos - original_start_pos) + start_pos;
@@ -367,7 +367,7 @@ impl SourceMap {
             SourceFileLines::Diffs(SourceFileDiffs { line_start, .. }) => {
                 *line_start = (*line_start - original_start_pos) + start_pos;
             }
-        }
+        });
         for mbc in &mut file_local_multibyte_chars {
             mbc.pos = (mbc.pos - original_start_pos) + start_pos;
         }
@@ -614,10 +614,16 @@ impl SourceMap {
 
             if let Some(ref src) = local_begin.sf.src {
                 extract_source(src, start_index, end_index)
-            } else if let Some(src) = local_begin.sf.external_src.borrow().get_source() {
-                extract_source(src, start_index, end_index)
             } else {
-                Err(SpanSnippetError::SourceNotAvailable { filename: local_begin.sf.name.clone() })
+                local_begin.sf.external_src.with_borrow(|src| {
+                    if let Some(src) = src.get_source() {
+                        extract_source(src, start_index, end_index)
+                    } else {
+                        Err(SpanSnippetError::SourceNotAvailable {
+                            filename: local_begin.sf.name.clone(),
+                        })
+                    }
+                })
             }
         }
     }
@@ -891,23 +897,24 @@ impl SourceMap {
             let sp = sp.data();
             let local_begin = self.lookup_byte_offset(sp.lo);
             let start_index = local_begin.pos.to_usize();
-            let src = local_begin.sf.external_src.borrow();
 
-            let snippet = if let Some(ref src) = local_begin.sf.src {
-                Some(&src[start_index..])
-            } else if let Some(src) = src.get_source() {
-                Some(&src[start_index..])
-            } else {
-                None
-            };
+            local_begin.sf.external_src.with_borrow(|src| {
+                let snippet = if let Some(ref src) = local_begin.sf.src {
+                    Some(&src[start_index..])
+                } else if let Some(src) = src.get_source() {
+                    Some(&src[start_index..])
+                } else {
+                    None
+                };
 
-            match snippet {
-                None => 1,
-                Some(snippet) => match snippet.chars().next() {
+                match snippet {
                     None => 1,
-                    Some(c) => c.len_utf8(),
-                },
-            }
+                    Some(snippet) => match snippet.chars().next() {
+                        None => 1,
+                        Some(c) => c.len_utf8(),
+                    },
+                }
+            })
         };
 
         sp.with_hi(BytePos(sp.lo().0 + width as u32))
@@ -1006,38 +1013,38 @@ impl SourceMap {
             return 1;
         }
 
-        let src = local_begin.sf.external_src.borrow();
-
-        // We need to extend the snippet to the end of the src rather than to end_index so when
-        // searching forwards for boundaries we've got somewhere to search.
-        let snippet = if let Some(ref src) = local_begin.sf.src {
-            &src[start_index..]
-        } else if let Some(src) = src.get_source() {
-            &src[start_index..]
-        } else {
-            return 1;
-        };
-        debug!("snippet=`{:?}`", snippet);
-
-        let mut target = if forwards { end_index + 1 } else { end_index - 1 };
-        debug!("initial target=`{:?}`", target);
-
-        while !snippet.is_char_boundary(target - start_index) && target < source_len {
-            target = if forwards {
-                target + 1
+        local_begin.sf.external_src.with_borrow(|src| {
+            // We need to extend the snippet to the end of the src rather than to end_index so when
+            // searching forwards for boundaries we've got somewhere to search.
+            let snippet = if let Some(ref src) = local_begin.sf.src {
+                &src[start_index..]
+            } else if let Some(src) = src.get_source() {
+                &src[start_index..]
             } else {
-                match target.checked_sub(1) {
-                    Some(target) => target,
-                    None => {
-                        break;
-                    }
-                }
+                return 1;
             };
-            debug!("target=`{:?}`", target);
-        }
-        debug!("final target=`{:?}`", target);
+            debug!("snippet=`{:?}`", snippet);
 
-        if forwards { (target - end_index) as u32 } else { (end_index - target) as u32 }
+            let mut target = if forwards { end_index + 1 } else { end_index - 1 };
+            debug!("initial target=`{:?}`", target);
+
+            while !snippet.is_char_boundary(target - start_index) && target < source_len {
+                target = if forwards {
+                    target + 1
+                } else {
+                    match target.checked_sub(1) {
+                        Some(target) => target,
+                        None => {
+                            break;
+                        }
+                    }
+                };
+                debug!("target=`{:?}`", target);
+            }
+            debug!("final target=`{:?}`", target);
+
+            if forwards { (target - end_index) as u32 } else { (end_index - target) as u32 }
+        })
     }
 
     pub fn get_source_file(&self, filename: &FileName) -> Option<Lrc<SourceFile>> {

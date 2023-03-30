@@ -98,7 +98,7 @@ impl CodeStats {
             opt_discr_size: opt_discr_size.map(|s| s.bytes()),
             variants,
         };
-        self.type_sizes.borrow_mut().insert(info);
+        self.type_sizes.lock().insert(info);
     }
 
     pub fn print_type_sizes(&self) {
