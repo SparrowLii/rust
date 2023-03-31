@@ -253,7 +253,6 @@ where
 
 #[cold]
 #[inline(never)]
-#[cfg(not(parallel_compiler))]
 fn cycle_error<Q, Qcx>(
     query: Q,
     qcx: Qcx,
@@ -369,6 +368,14 @@ where
                 }
                 #[cfg(parallel_compiler)]
                 QueryResult::Started(job) => {
+                    if !rustc_data_structures::sync::active() {
+                        let id = job.id;
+                        drop(state_lock);
+
+                        // If we are single-threaded we know that we have cycle error,
+                        // so we just return the error.
+                        return cycle_error(query, qcx, id, span);
+                    }
                     // Get the latch out
                     let latch = job.latch();
                     drop(state_lock);
