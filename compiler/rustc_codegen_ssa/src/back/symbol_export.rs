@@ -263,7 +263,7 @@ fn exported_symbols_provider_local(
         }));
     }
 
-    if tcx.sess.opts.unstable_opts.sanitizer.contains(SanitizerSet::MEMORY) {
+    if tcx.sess.opts.cg.sanitizer.contains(SanitizerSet::MEMORY) {
         let mut msan_weak_symbols = Vec::new();
 
         // Similar to profiling, preserve weak msan symbol during LTO.

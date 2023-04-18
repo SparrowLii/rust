@@ -558,6 +558,11 @@ impl<'tcx> GlobalCtxt<'tcx> {
 }
 
 impl<'tcx> TyCtxt<'tcx> {
+    /*pub fn write_temp(self, mut f_s: impl FnMut(&mut String)) {
+        let mut f = std::fs::File::open("temp.txt").unwrap();
+
+    }*/
+
     /// Expects a body and returns its codegen attributes.
     ///
     /// Unlike `codegen_fn_attrs`, this returns `CodegenFnAttrs::EMPTY` for

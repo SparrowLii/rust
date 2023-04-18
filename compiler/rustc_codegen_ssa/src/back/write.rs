@@ -194,7 +194,7 @@ impl ModuleConfig {
                 false
             ),
 
-            sanitizer: if_regular!(sess.opts.unstable_opts.sanitizer, SanitizerSet::empty()),
+            sanitizer: if_regular!(sess.opts.cg.sanitizer, SanitizerSet::empty()),
             sanitizer_recover: if_regular!(
                 sess.opts.unstable_opts.sanitizer_recover,
                 SanitizerSet::empty()
