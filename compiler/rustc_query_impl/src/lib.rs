@@ -20,7 +20,7 @@ use rustc_middle::dep_graph::{self, DepKind, DepKindStruct};
 use rustc_middle::query::erase::{erase, restore, Erase};
 use rustc_middle::query::AsLocalKey;
 use rustc_middle::ty::query::{
-    query_keys, query_provided, query_provided_to_value, query_storage, query_values,
+    query_keys, query_provided, query_provided_to_value, query_storage_single, query_values,
 };
 use rustc_middle::ty::query::{ExternProviders, Providers, QueryEngine, QuerySystemFns};
 use rustc_middle::ty::TyCtxt;

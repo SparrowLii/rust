@@ -40,7 +40,7 @@
 //! [^2] `MTLockRef` is a typedef.
 
 use crate::owned_slice::OwnedSlice;
-use std::cell::{Cell, UnsafeCell};
+use std::cell::{Cell, RefCell, RefMut, UnsafeCell};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::hash::{BuildHasher, Hash};
@@ -54,6 +54,7 @@ pub use worker_local::{Registry, WorkerLocal};
 
 pub use std::sync::atomic::Ordering;
 pub use std::sync::atomic::Ordering::SeqCst;
+use std::sync::{Mutex, MutexGuard};
 
 pub use vec::{AppendOnlyIndexVec, AppendOnlyVec};
 
@@ -755,6 +756,101 @@ impl<'a, T> Drop for LockGuard<'a, T> {
         } else {
             unlock_mt(self)
         }
+    }
+}
+
+pub trait SLock {
+    type Lock<T>: LockLike<T>;
+}
+
+pub trait LockLike<T> {
+    type LockGuard<'a>: DerefMut<Target = T>
+    where
+        Self: 'a;
+
+    fn new(val: T) -> Self;
+
+    fn into_inner(self) -> T;
+
+    fn get_mut(&mut self) -> &mut T;
+
+    fn try_lock(&self) -> Option<Self::LockGuard<'_>>;
+
+    fn lock(&self) -> Self::LockGuard<'_>;
+}
+
+pub struct SRefCell;
+
+impl SLock for SRefCell {
+    type Lock<T> = RefCell<T>;
+}
+
+impl<T> LockLike<T> for RefCell<T> {
+    type LockGuard<'a> = RefMut<'a, T> where T: 'a;
+
+    #[inline]
+    fn new(val: T) -> Self {
+        RefCell::new(val)
+    }
+
+    #[inline]
+    fn into_inner(self) -> T {
+        self.into_inner()
+    }
+
+    #[inline]
+    fn get_mut(&mut self) -> &mut T {
+        self.get_mut()
+    }
+
+    #[inline]
+    fn try_lock(&self) -> Option<RefMut<'_, T>> {
+        self.try_borrow_mut().ok()
+    }
+
+    #[inline(always)]
+    #[track_caller]
+    fn lock(&self) -> RefMut<'_, T> {
+        self.borrow_mut()
+    }
+}
+
+pub struct SMutex;
+
+impl SLock for SMutex {
+    type Lock<T> = Mutex<T>;
+}
+
+impl<T> LockLike<T> for Mutex<T> {
+    type LockGuard<'a> = MutexGuard<'a, T> where T: 'a;
+
+    #[inline]
+    fn new(val: T) -> Self {
+        Mutex::new(val)
+    }
+
+    #[inline]
+    fn into_inner(self) -> T {
+        self.into_inner().unwrap()
+    }
+
+    #[inline]
+    fn get_mut(&mut self) -> &mut T {
+        self.get_mut().unwrap()
+    }
+
+    #[inline]
+    fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        self.try_lock().ok()
+    }
+
+    #[inline(always)]
+    #[track_caller]
+    fn lock(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| {
+            self.clear_poison();
+            e.into_inner()
+        })
     }
 }
 

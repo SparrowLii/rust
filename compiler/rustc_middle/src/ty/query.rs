@@ -55,6 +55,7 @@ use rustc_data_structures::svh::Svh;
 use rustc_data_structures::sync::AtomicU64;
 use rustc_data_structures::sync::Lrc;
 use rustc_data_structures::sync::WorkerLocal;
+use rustc_data_structures::sync::{SMutex, SRefCell};
 use rustc_data_structures::unord::UnordSet;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
@@ -119,7 +120,8 @@ pub struct QuerySystemFns<'tcx> {
 pub struct QuerySystem<'tcx> {
     pub states: QueryStates<'tcx>,
     pub arenas: QueryArenas<'tcx>,
-    pub caches: QueryCaches<'tcx>,
+
+    pub caches: QueryCachesSingle<'tcx>,
 
     /// This provides access to the incremental compilation on-disk cache for query results.
     /// Do not access this directly. It is only meant to be used by
@@ -149,6 +151,8 @@ impl<'tcx> QuerySystem<'tcx> {
     }
 }
 
+// just for speed test
+unsafe impl<'tcx> Sync for QuerySystem<'tcx> {}
 #[derive(Copy, Clone)]
 pub struct TyCtxtAt<'tcx> {
     pub tcx: TyCtxt<'tcx>,
@@ -371,11 +375,20 @@ macro_rules! define_callbacks {
             )*
         }
         #[allow(nonstandard_style, unused_lifetimes)]
-        pub mod query_storage {
+        pub mod query_storage_single {
             use super::*;
 
             $(
-                pub type $name<'tcx> = <<$($K)* as Key>::CacheSelector as CacheSelector<'tcx, Erase<$V>>>::Cache;
+                pub type $name<'tcx> = <<$($K)* as Key>::CacheSelector as CacheSelector<'tcx, Erase<$V>, SRefCell>>::Cache;
+            )*
+        }
+
+        #[allow(nonstandard_style, unused_lifetimes)]
+        pub mod query_storage_parallel {
+            use super::*;
+
+            $(
+                pub type $name<'tcx> = <<$($K)* as Key>::CacheSelector as CacheSelector<'tcx, Erase<$V>, SMutex>>::Cache;
             )*
         }
 
@@ -433,8 +446,13 @@ macro_rules! define_callbacks {
         }
 
         #[derive(Default)]
-        pub struct QueryCaches<'tcx> {
-            $($(#[$attr])* pub $name: query_storage::$name<'tcx>,)*
+        pub struct QueryCachesSingle<'tcx> {
+            $($(#[$attr])* pub $name: query_storage_single::$name<'tcx>,)*
+        }
+
+        #[derive(Default)]
+        pub struct QueryCachesParallel<'tcx> {
+            $($(#[$attr])* pub $name: query_storage_parallel::$name<'tcx>,)*
         }
 
         impl<'tcx> TyCtxtEnsure<'tcx> {

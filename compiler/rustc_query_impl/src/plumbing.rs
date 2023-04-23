@@ -538,7 +538,7 @@ macro_rules! define_queries {
                 ::rustc_middle::query::cached::$name(tcx, key)
             }
 
-            type Cache = query_storage::$name<'tcx>;
+            type Cache = query_storage_single::$name<'tcx>;
 
             #[inline(always)]
             fn query_state<'a>(self, tcx: QueryCtxt<'tcx>) -> &'a QueryState<Self::Key, crate::dep_graph::DepKind>
