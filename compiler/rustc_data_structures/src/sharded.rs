@@ -1,5 +1,5 @@
 use crate::fx::{FxHashMap, FxHasher};
-use crate::sync::{CacheAligned, Lock, LockGuard};
+use crate::sync::{CacheAligned, Lock, LockGuard, LockLike, SLock};
 use std::borrow::Borrow;
 use std::collections::hash_map::RawEntryMut;
 use std::hash::{Hash, Hasher};
@@ -60,15 +60,23 @@ impl<T: Default> Sharded<T> {
     }
 }
 
-pub type ShardedHashMap<K, V> = Sharded<FxHashMap<K, V>>;
+pub struct ShardedHashMap<K, V, L: SLock> {
+    pub shard: L::Lock<FxHashMap<K, V>>,
+}
 
-impl<K: Eq, V> ShardedHashMap<K, V> {
-    pub fn len(&self) -> usize {
-        self.lock_shards().iter().map(|shard| shard.len()).sum()
+impl<K, V, L: SLock> Default for ShardedHashMap<K, V, L> {
+    fn default() -> Self {
+        ShardedHashMap { shard: L::Lock::new(FxHashMap::default()) }
     }
 }
 
-impl<K: Eq + Hash + Copy> ShardedHashMap<K, ()> {
+impl<K: Eq, V, L: SLock> ShardedHashMap<K, V, L> {
+    pub fn len(&self) -> usize {
+        self.shard.lock().len()
+    }
+}
+
+impl<K: Eq + Hash + Copy, L: SLock> ShardedHashMap<K, (), L> {
     #[inline]
     pub fn intern_ref<Q: ?Sized>(&self, value: &Q, make: impl FnOnce() -> K) -> K
     where
@@ -76,18 +84,17 @@ impl<K: Eq + Hash + Copy> ShardedHashMap<K, ()> {
         Q: Hash + Eq,
     {
         let hash = make_hash(value);
-        self.with_get_shard_by_hash(hash, |shard| {
-            let entry = shard.raw_entry_mut().from_key_hashed_nocheck(hash, value);
+        let mut shard = self.shard.lock();
+        let entry = shard.raw_entry_mut().from_key_hashed_nocheck(hash, value);
 
-            match entry {
-                RawEntryMut::Occupied(e) => *e.key(),
-                RawEntryMut::Vacant(e) => {
-                    let v = make();
-                    e.insert_hashed_nocheck(hash, v, ());
-                    v
-                }
+        match entry {
+            RawEntryMut::Occupied(e) => *e.key(),
+            RawEntryMut::Vacant(e) => {
+                let v = make();
+                e.insert_hashed_nocheck(hash, v, ());
+                v
             }
-        })
+        }
     }
 
     #[inline]
@@ -97,18 +104,17 @@ impl<K: Eq + Hash + Copy> ShardedHashMap<K, ()> {
         Q: Hash + Eq,
     {
         let hash = make_hash(&value);
-        self.with_get_shard_by_hash(hash, |shard| {
-            let entry = shard.raw_entry_mut().from_key_hashed_nocheck(hash, &value);
+        let mut shard = self.shard.lock();
+        let entry = shard.raw_entry_mut().from_key_hashed_nocheck(hash, &value);
 
-            match entry {
-                RawEntryMut::Occupied(e) => *e.key(),
-                RawEntryMut::Vacant(e) => {
-                    let v = make(value);
-                    e.insert_hashed_nocheck(hash, v, ());
-                    v
-                }
+        match entry {
+            RawEntryMut::Occupied(e) => *e.key(),
+            RawEntryMut::Vacant(e) => {
+                let v = make(value);
+                e.insert_hashed_nocheck(hash, v, ());
+                v
             }
-        })
+        }
     }
 }
 
@@ -117,14 +123,12 @@ pub trait IntoPointer {
     fn into_pointer(&self) -> *const ();
 }
 
-impl<K: Eq + Hash + Copy + IntoPointer> ShardedHashMap<K, ()> {
+impl<K: Eq + Hash + Copy + IntoPointer, L: SLock> ShardedHashMap<K, (), L> {
     pub fn contains_pointer_to<T: Hash + IntoPointer>(&self, value: &T) -> bool {
         let hash = make_hash(&value);
-
-        self.with_get_shard_by_hash(hash, |shard| {
-            let value = value.into_pointer();
-            shard.raw_entry().from_hash(hash, |entry| entry.into_pointer() == value).is_some()
-        })
+        let shard = self.shard.lock();
+        let value = value.into_pointer();
+        shard.raw_entry().from_hash(hash, |entry| entry.into_pointer() == value).is_some()
     }
 }
 

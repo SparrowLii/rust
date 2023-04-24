@@ -38,7 +38,9 @@ use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_data_structures::sharded::{IntoPointer, ShardedHashMap};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::steal::Steal;
-use rustc_data_structures::sync::{self, Lock, Lrc, MappedReadGuard, ReadGuard, WorkerLocal};
+use rustc_data_structures::sync::{
+    self, Lock, Lrc, MappedReadGuard, ReadGuard, SLock, SMutex, SRefCell, WorkerLocal,
+};
 use rustc_data_structures::unord::UnordSet;
 use rustc_errors::{
     DecorateLint, DiagnosticBuilder, DiagnosticMessage, ErrorGuaranteed, MultiSpan,
@@ -118,56 +120,89 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
     type PlaceholderRegion = ty::PlaceholderRegion;
 }
 
-type InternedSet<'tcx, T> = ShardedHashMap<InternedInSet<'tcx, T>, ()>;
+type InternedSet<'tcx, T, L> = ShardedHashMap<InternedInSet<'tcx, T>, (), L>;
 
 pub struct CtxtInterners<'tcx> {
+    single_thread: bool,
+    inner: CtxtInternersInner<'tcx, SRefCell>,
+    mt_inner: CtxtInternersInner<'tcx, SMutex>,
+}
+
+// just for speed test
+unsafe impl<'tcx> Sync for CtxtInterners<'tcx> {}
+
+struct CtxtInternersInner<'tcx, L: SLock> {
     /// The arena that types, regions, etc. are allocated from.
     arena: &'tcx WorkerLocal<Arena<'tcx>>,
 
     // Specifically use a speedy hash algorithm for these hash sets, since
     // they're accessed quite often.
-    type_: InternedSet<'tcx, WithCachedTypeInfo<TyKind<'tcx>>>,
-    const_lists: InternedSet<'tcx, List<ty::Const<'tcx>>>,
-    substs: InternedSet<'tcx, InternalSubsts<'tcx>>,
-    type_lists: InternedSet<'tcx, List<Ty<'tcx>>>,
-    canonical_var_infos: InternedSet<'tcx, List<CanonicalVarInfo<'tcx>>>,
-    region: InternedSet<'tcx, RegionKind<'tcx>>,
-    poly_existential_predicates: InternedSet<'tcx, List<PolyExistentialPredicate<'tcx>>>,
-    predicate: InternedSet<'tcx, WithCachedTypeInfo<ty::Binder<'tcx, PredicateKind<'tcx>>>>,
-    predicates: InternedSet<'tcx, List<Predicate<'tcx>>>,
-    projs: InternedSet<'tcx, List<ProjectionKind>>,
-    place_elems: InternedSet<'tcx, List<PlaceElem<'tcx>>>,
-    const_: InternedSet<'tcx, ConstData<'tcx>>,
-    const_allocation: InternedSet<'tcx, Allocation>,
-    bound_variable_kinds: InternedSet<'tcx, List<ty::BoundVariableKind>>,
-    layout: InternedSet<'tcx, LayoutS>,
-    adt_def: InternedSet<'tcx, AdtDefData>,
-    external_constraints: InternedSet<'tcx, ExternalConstraintsData<'tcx>>,
-    fields: InternedSet<'tcx, List<FieldIdx>>,
+    type_: InternedSet<'tcx, WithCachedTypeInfo<TyKind<'tcx>>, L>,
+    const_lists: InternedSet<'tcx, List<ty::Const<'tcx>>, L>,
+    substs: InternedSet<'tcx, InternalSubsts<'tcx>, L>,
+    type_lists: InternedSet<'tcx, List<Ty<'tcx>>, L>,
+    canonical_var_infos: InternedSet<'tcx, List<CanonicalVarInfo<'tcx>>, L>,
+    region: InternedSet<'tcx, RegionKind<'tcx>, L>,
+    poly_existential_predicates: InternedSet<'tcx, List<PolyExistentialPredicate<'tcx>>, L>,
+    predicate: InternedSet<'tcx, WithCachedTypeInfo<ty::Binder<'tcx, PredicateKind<'tcx>>>, L>,
+    predicates: InternedSet<'tcx, List<Predicate<'tcx>>, L>,
+    projs: InternedSet<'tcx, List<ProjectionKind>, L>,
+    place_elems: InternedSet<'tcx, List<PlaceElem<'tcx>>, L>,
+    const_: InternedSet<'tcx, ConstData<'tcx>, L>,
+    const_allocation: InternedSet<'tcx, Allocation, L>,
+    bound_variable_kinds: InternedSet<'tcx, List<ty::BoundVariableKind>, L>,
+    layout: InternedSet<'tcx, LayoutS, L>,
+    adt_def: InternedSet<'tcx, AdtDefData, L>,
+    external_constraints: InternedSet<'tcx, ExternalConstraintsData<'tcx>, L>,
+    fields: InternedSet<'tcx, List<FieldIdx>, L>,
 }
 
 impl<'tcx> CtxtInterners<'tcx> {
     fn new(arena: &'tcx WorkerLocal<Arena<'tcx>>) -> CtxtInterners<'tcx> {
         CtxtInterners {
-            arena,
-            type_: Default::default(),
-            const_lists: Default::default(),
-            substs: Default::default(),
-            type_lists: Default::default(),
-            region: Default::default(),
-            poly_existential_predicates: Default::default(),
-            canonical_var_infos: Default::default(),
-            predicate: Default::default(),
-            predicates: Default::default(),
-            projs: Default::default(),
-            place_elems: Default::default(),
-            const_: Default::default(),
-            const_allocation: Default::default(),
-            bound_variable_kinds: Default::default(),
-            layout: Default::default(),
-            adt_def: Default::default(),
-            external_constraints: Default::default(),
-            fields: Default::default(),
+            single_thread: true,
+            inner: CtxtInternersInner {
+                arena,
+                type_: Default::default(),
+                const_lists: Default::default(),
+                substs: Default::default(),
+                type_lists: Default::default(),
+                region: Default::default(),
+                poly_existential_predicates: Default::default(),
+                canonical_var_infos: Default::default(),
+                predicate: Default::default(),
+                predicates: Default::default(),
+                projs: Default::default(),
+                place_elems: Default::default(),
+                const_: Default::default(),
+                const_allocation: Default::default(),
+                bound_variable_kinds: Default::default(),
+                layout: Default::default(),
+                adt_def: Default::default(),
+                external_constraints: Default::default(),
+                fields: Default::default(),
+            },
+            mt_inner: CtxtInternersInner {
+                arena,
+                type_: Default::default(),
+                const_lists: Default::default(),
+                substs: Default::default(),
+                type_lists: Default::default(),
+                region: Default::default(),
+                poly_existential_predicates: Default::default(),
+                canonical_var_infos: Default::default(),
+                predicate: Default::default(),
+                predicates: Default::default(),
+                projs: Default::default(),
+                place_elems: Default::default(),
+                const_: Default::default(),
+                const_allocation: Default::default(),
+                bound_variable_kinds: Default::default(),
+                layout: Default::default(),
+                adt_def: Default::default(),
+                external_constraints: Default::default(),
+                fields: Default::default(),
+            },
         }
     }
 
@@ -176,12 +211,13 @@ impl<'tcx> CtxtInterners<'tcx> {
     #[inline(never)]
     fn intern_ty(&self, kind: TyKind<'tcx>, sess: &Session, untracked: &Untracked) -> Ty<'tcx> {
         Ty(Interned::new_unchecked(
-            self.type_
+            self.inner
+                .type_
                 .intern(kind, |kind| {
                     let flags = super::flags::FlagComputation::for_kind(&kind);
                     let stable_hash = self.stable_hash(&flags, sess, untracked, &kind);
 
-                    InternedInSet(self.arena.alloc(WithCachedTypeInfo {
+                    InternedInSet(self.inner.arena.alloc(WithCachedTypeInfo {
                         internee: kind,
                         stable_hash,
                         flags: flags.flags,
@@ -220,13 +256,14 @@ impl<'tcx> CtxtInterners<'tcx> {
         untracked: &Untracked,
     ) -> Predicate<'tcx> {
         Predicate(Interned::new_unchecked(
-            self.predicate
+            self.inner
+                .predicate
                 .intern(kind, |kind| {
                     let flags = super::flags::FlagComputation::for_predicate(kind);
 
                     let stable_hash = self.stable_hash(&flags, sess, untracked, &kind);
 
-                    InternedInSet(self.arena.alloc(WithCachedTypeInfo {
+                    InternedInSet(self.inner.arena.alloc(WithCachedTypeInfo {
                         internee: kind,
                         stable_hash,
                         flags: flags.flags,
@@ -366,7 +403,11 @@ impl<'tcx> CommonLifetimes<'tcx> {
     fn new(interners: &CtxtInterners<'tcx>) -> CommonLifetimes<'tcx> {
         let mk = |r| {
             Region(Interned::new_unchecked(
-                interners.region.intern(r, |r| InternedInSet(interners.arena.alloc(r))).0,
+                interners
+                    .inner
+                    .region
+                    .intern(r, |r| InternedInSet(interners.inner.arena.alloc(r)))
+                    .0,
             ))
         };
 
@@ -399,7 +440,11 @@ impl<'tcx> CommonConsts<'tcx> {
     fn new(interners: &CtxtInterners<'tcx>, types: &CommonTypes<'tcx>) -> CommonConsts<'tcx> {
         let mk_const = |c| {
             Const(Interned::new_unchecked(
-                interners.const_.intern(c, |c| InternedInSet(interners.arena.alloc(c))).0,
+                interners
+                    .inner
+                    .const_
+                    .intern(c, |c| InternedInSet(interners.inner.arena.alloc(c)))
+                    .0,
             ))
         };
 
@@ -1237,12 +1282,23 @@ macro_rules! nop_lift {
         impl<'a, 'tcx> Lift<'tcx> for $ty {
             type Lifted = $lifted;
             fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-                tcx.interners
-                    .$set
-                    .contains_pointer_to(&InternedInSet(&*self.0.0))
-                    // SAFETY: `self` is interned and therefore valid
-                    // for the entire lifetime of the `TyCtxt`.
-                    .then(|| unsafe { mem::transmute(self) })
+                if tcx.interners.single_thread {
+                    tcx.interners
+                        .inner
+                        .$set
+                        .contains_pointer_to(&InternedInSet(&*self.0.0))
+                        // SAFETY: `self` is interned and therefore valid
+                        // for the entire lifetime of the `TyCtxt`.
+                        .then(|| unsafe { mem::transmute(self) })
+                } else {
+                    tcx.interners
+                        .mt_inner
+                        .$set
+                        .contains_pointer_to(&InternedInSet(&*self.0.0))
+                        // SAFETY: `self` is interned and therefore valid
+                        // for the entire lifetime of the `TyCtxt`.
+                        .then(|| unsafe { mem::transmute(self) })
+                }
             }
         }
     };
@@ -1256,10 +1312,19 @@ macro_rules! nop_list_lift {
                 if self.is_empty() {
                     return Some(List::empty());
                 }
-                tcx.interners
-                    .$set
-                    .contains_pointer_to(&InternedInSet(self))
-                    .then(|| unsafe { mem::transmute(self) })
+                if tcx.interners.single_thread {
+                    tcx.interners
+                        .inner
+                        .$set
+                        .contains_pointer_to(&InternedInSet(self))
+                        .then(|| unsafe { mem::transmute(self) })
+                } else {
+                    tcx.interners
+                        .mt_inner
+                        .$set
+                        .contains_pointer_to(&InternedInSet(self))
+                        .then(|| unsafe { mem::transmute(self) })
+                }
             }
         }
     };
@@ -1296,6 +1361,7 @@ macro_rules! sty_debug_print {
         mod inner {
             use crate::ty::{self, TyCtxt};
             use crate::ty::context::InternedInSet;
+            use crate::rustc_data_structures::sync::LockLike;
 
             #[derive(Copy, Clone)]
             struct DebugStat {
@@ -1316,8 +1382,8 @@ macro_rules! sty_debug_print {
                 };
                 $(let mut $variant = total;)*
 
-                let shards = tcx.interners.type_.lock_shards();
-                let types = shards.iter().flat_map(|shard| shard.keys());
+                let shards = tcx.interners.inner.type_.shard.lock();
+                let types = shards.keys();
                 for &InternedInSet(t) in types {
                     let variant = match t.internee {
                         ty::Bool | ty::Char | ty::Int(..) | ty::Uint(..) |
@@ -1391,14 +1457,14 @@ impl<'tcx> TyCtxt<'tcx> {
                     Foreign
                 )?;
 
-                writeln!(fmt, "InternalSubsts interner: #{}", self.0.interners.substs.len())?;
-                writeln!(fmt, "Region interner: #{}", self.0.interners.region.len())?;
+                writeln!(fmt, "InternalSubsts interner: #{}", self.0.interners.inner.substs.len())?;
+                writeln!(fmt, "Region interner: #{}", self.0.interners.inner.region.len())?;
                 writeln!(
                     fmt,
                     "Const Allocation interner: #{}",
-                    self.0.interners.const_allocation.len()
+                    self.0.interners.inner.const_allocation.len()
                 )?;
-                writeln!(fmt, "Layout interner: #{}", self.0.interners.layout.len())?;
+                writeln!(fmt, "Layout interner: #{}", self.0.interners.inner.layout.len())?;
 
                 Ok(())
             }
@@ -1503,9 +1569,17 @@ macro_rules! direct_interners {
 
         impl<'tcx> TyCtxt<'tcx> {
             $vis fn $method(self, v: $ty) -> $ret_ty {
-                $ret_ctor(Interned::new_unchecked(self.interners.$name.intern(v, |v| {
-                    InternedInSet(self.interners.arena.alloc(v))
-                }).0))
+                $ret_ctor(Interned::new_unchecked(
+                    if self.interners.single_thread {
+                        self.interners.inner.$name.intern(v, |v| {
+                            InternedInSet(self.interners.inner.arena.alloc(v))
+                        }).0
+                    } else {
+                        self.interners.mt_inner.$name.intern(v, |v| {
+                            InternedInSet(self.interners.mt_inner.arena.alloc(v))
+                        }).0
+                    }
+                ))
             }
         })+
     }
@@ -1530,8 +1604,12 @@ macro_rules! slice_interners {
             $($vis fn $method(self, v: &[$ty]) -> &'tcx List<$ty> {
                 if v.is_empty() {
                     List::empty()
+                } else if self.interners.single_thread {
+                    self.interners.inner.$field.intern_ref(v, || {
+                        InternedInSet(List::from_arena(&*self.arena, v))
+                    }).0
                 } else {
-                    self.interners.$field.intern_ref(v, || {
+                    self.interners.mt_inner.$field.intern_ref(v, || {
                         InternedInSet(List::from_arena(&*self.arena, v))
                     }).0
                 }
