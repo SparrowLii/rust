@@ -6,6 +6,7 @@
 #![feature(min_specialization)]
 #![feature(never_type)]
 #![feature(rustc_attrs)]
+#![feature(core_intrinsics)]
 #![recursion_limit = "256"]
 #![allow(rustc::potential_query_instability)]
 #![deny(rustc::untranslatable_diagnostic)]
@@ -15,18 +16,20 @@
 extern crate rustc_middle;
 
 use crate::plumbing::{encode_all_query_results, try_mark_green};
+use rustc_data_structures::sync::{SLock, SMutex, SRefCell};
 use rustc_middle::arena::Arena;
 use rustc_middle::dep_graph::{self, DepKind, DepKindStruct};
 use rustc_middle::query::erase::{erase, restore, Erase};
 use rustc_middle::query::AsLocalKey;
 use rustc_middle::ty::query::{
-    query_keys, query_provided, query_provided_to_value, query_storage_single, query_values,
+    query_keys, query_provided, query_provided_to_value, query_storage, query_values,
 };
 use rustc_middle::ty::query::{ExternProviders, Providers, QueryEngine, QuerySystemFns};
 use rustc_middle::ty::TyCtxt;
-use rustc_query_system::dep_graph::SerializedDepNodeIndex;
+use rustc_query_system::dep_graph::{DepNodeIndex, SerializedDepNodeIndex};
 use rustc_query_system::Value;
 use rustc_span::Span;
+use std::intrinsics::likely;
 
 #[macro_use]
 mod plumbing;

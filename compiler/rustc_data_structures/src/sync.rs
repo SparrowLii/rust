@@ -50,7 +50,6 @@ use std::ops::{Deref, DerefMut};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
 mod worker_local;
-pub use worker_local::{Registry, WorkerLocal};
 
 pub use std::sync::atomic::Ordering;
 pub use std::sync::atomic::Ordering::SeqCst;
@@ -550,8 +549,8 @@ pub fn assert_send<T: ?Sized + Send>() {}
 pub fn assert_send_val<T: ?Sized + Send>(_t: &T) {}
 pub fn assert_send_sync_val<T: ?Sized + Sync + Send>(_t: &T) {}
 
-#[derive(Default)]
-#[cfg_attr(parallel_compiler, repr(align(64)))]
+#[derive(Default, Debug)]
+#[repr(align(64))]
 pub struct CacheAligned<T>(pub T);
 
 pub trait HashMapExt<K, V> {
@@ -759,7 +758,7 @@ impl<'a, T> Drop for LockGuard<'a, T> {
     }
 }
 
-pub trait SLock {
+pub trait SLock: Copy {
     type Lock<T>: LockLike<T>;
 }
 
@@ -779,6 +778,7 @@ pub trait LockLike<T> {
     fn lock(&self) -> Self::LockGuard<'_>;
 }
 
+#[derive(Copy, Clone, Default)]
 pub struct SRefCell;
 
 impl SLock for SRefCell {
@@ -815,6 +815,7 @@ impl<T> LockLike<T> for RefCell<T> {
     }
 }
 
+#[derive(Copy, Clone, Default)]
 pub struct SMutex;
 
 impl SLock for SMutex {
@@ -1224,7 +1225,7 @@ impl<T: Clone> Clone for RwLock<T> {
 pub struct WorkerLocal<T> {
     single_thread: bool,
     inner: Option<T>,
-    mt_inner: Option<rayon_core::WorkerLocal<T>>,
+    mt_inner: Option<worker_local::WorkerLocal<T>>,
 }
 
 impl<T> WorkerLocal<T> {
@@ -1238,18 +1239,8 @@ impl<T> WorkerLocal<T> {
             WorkerLocal {
                 single_thread: false,
                 inner: None,
-                mt_inner: Some(rayon_core::WorkerLocal::new(f)),
+                mt_inner: Some(worker_local::WorkerLocal::new(f)),
             }
-        }
-    }
-
-    /// Returns the worker-local value for each thread
-    #[inline]
-    pub fn into_inner(self) -> Vec<T> {
-        if self.single_thread {
-            vec![self.inner.unwrap()]
-        } else {
-            self.mt_inner.unwrap().into_inner()
         }
     }
 }
@@ -1271,6 +1262,7 @@ impl<T> Deref for WorkerLocal<T> {
 unsafe impl<T: Send> std::marker::Sync for WorkerLocal<T> {}
 
 use std::thread;
+pub use worker_local::Registry;
 
 /// A type which only allows its inner value to be used in one thread.
 /// It will panic if it is used on multiple threads.
