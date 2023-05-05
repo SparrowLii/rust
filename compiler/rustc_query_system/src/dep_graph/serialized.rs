@@ -17,7 +17,7 @@ use super::{DepKind, DepNode, DepNodeIndex};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::profiling::SelfProfilerRef;
-use rustc_data_structures::sync::Lock;
+use rustc_data_structures::sync::{LockLike, SLock};
 use rustc_index::{Idx, IndexVec};
 use rustc_serialize::opaque::{FileEncodeResult, FileEncoder, IntEncodedWithFixedSize, MemDecoder};
 use rustc_serialize::{Decodable, Decoder, Encodable};
@@ -154,14 +154,14 @@ struct Stat<K: DepKind> {
 }
 
 struct EncoderState<K: DepKind> {
-    encoder: FileEncoder,
+    encoder: Option<FileEncoder>,
     total_node_count: usize,
     total_edge_count: usize,
     stats: Option<FxHashMap<K, Stat<K>>>,
 }
 
 impl<K: DepKind> EncoderState<K> {
-    fn new(encoder: FileEncoder, record_stats: bool) -> Self {
+    fn new(encoder: Option<FileEncoder>, record_stats: bool) -> Self {
         Self {
             encoder,
             total_edge_count: 0,
@@ -170,10 +170,10 @@ impl<K: DepKind> EncoderState<K> {
         }
     }
 
-    fn encode_node(
+    fn encode_node<L: SLock>(
         &mut self,
         node: &NodeInfo<K>,
-        record_graph: &Option<Lock<DepGraphQuery<K>>>,
+        record_graph: &Option<L::Lock<DepGraphQuery<K>>>,
     ) -> DepNodeIndex {
         let index = DepNodeIndex::new(self.total_node_count);
         self.total_node_count += 1;
@@ -196,13 +196,15 @@ impl<K: DepKind> EncoderState<K> {
             stat.edge_counter += edge_count as u64;
         }
 
-        let encoder = &mut self.encoder;
+        let encoder = self.encoder.as_mut().unwrap();
         node.encode(encoder);
         index
     }
 
     fn finish(self, profiler: &SelfProfilerRef) -> FileEncodeResult {
-        let Self { mut encoder, total_node_count, total_edge_count, stats: _ } = self;
+        let Self { encoder, total_node_count, total_edge_count, stats: _ } = self;
+
+        let mut encoder = encoder.unwrap();
 
         let node_count = total_node_count.try_into().unwrap();
         let edge_count = total_edge_count.try_into().unwrap();
@@ -223,26 +225,26 @@ impl<K: DepKind> EncoderState<K> {
     }
 }
 
-pub struct GraphEncoder<K: DepKind> {
-    status: Lock<EncoderState<K>>,
-    record_graph: Option<Lock<DepGraphQuery<K>>>,
+pub struct GraphEncoder<K: DepKind, L: SLock> {
+    status: L::Lock<EncoderState<K>>,
+    record_graph: Option<L::Lock<DepGraphQuery<K>>>,
 }
 
-impl<K: DepKind + Encodable<FileEncoder>> GraphEncoder<K> {
+impl<K: DepKind + Encodable<FileEncoder>, L: SLock> GraphEncoder<K, L> {
     pub fn new(
-        encoder: FileEncoder,
+        encoder: Option<FileEncoder>,
         prev_node_count: usize,
         record_graph: bool,
         record_stats: bool,
     ) -> Self {
-        let record_graph = record_graph.then(|| Lock::new(DepGraphQuery::new(prev_node_count)));
-        let status = Lock::new(EncoderState::new(encoder, record_stats));
+        let record_graph = record_graph.then(|| L::Lock::new(DepGraphQuery::new(prev_node_count)));
+        let status = L::Lock::new(EncoderState::new(encoder, record_stats));
         GraphEncoder { status, record_graph }
     }
 
     pub(crate) fn with_query(&self, f: impl Fn(&DepGraphQuery<K>)) {
         if let Some(record_graph) = &self.record_graph {
-            record_graph.with_borrow(f)
+            f(&*record_graph.lock())
         }
     }
 
@@ -307,7 +309,7 @@ impl<K: DepKind + Encodable<FileEncoder>> GraphEncoder<K> {
     ) -> DepNodeIndex {
         let _prof_timer = profiler.generic_activity("incr_comp_encode_dep_graph");
         let node = NodeInfo { node, fingerprint, edges };
-        self.status.with_lock(|status| status.encode_node(&node, &self.record_graph))
+        self.status.lock().encode_node::<L>(&node, &self.record_graph)
     }
 
     pub fn finish(self, profiler: &SelfProfilerRef) -> FileEncodeResult {

@@ -2,10 +2,11 @@ use parking_lot::Mutex;
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::profiling::{EventId, QueryInvocationId, SelfProfilerRef};
-use rustc_data_structures::sharded::Sharded;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::steal::Steal;
-use rustc_data_structures::sync::{AtomicU32, AtomicU64, Lock, Lrc, Ordering};
+use rustc_data_structures::sync::{
+    AtomicU32, AtomicU64, Lock, LockLike, Lrc, Ordering, SLock, SMutex, SRefCell,
+};
 use rustc_index::IndexVec;
 use rustc_serialize::opaque::{FileEncodeResult, FileEncoder};
 use smallvec::{smallvec, SmallVec};
@@ -13,6 +14,7 @@ use std::assert_matches::assert_matches;
 use std::collections::hash_map::Entry;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::intrinsics::likely;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -198,7 +200,7 @@ impl<K: DepKind> DepGraph<K> {
 
     pub fn with_query(&self, f: impl Fn(&DepGraphQuery<K>)) {
         if let Some(data) = &self.data {
-            data.current.encoder.borrow().with_query(f)
+            data.current.with_query_encoder(f)
         }
     }
 
@@ -547,7 +549,9 @@ impl<K: DepKind> DepGraph<K> {
             //
             // For sanity, we still check that the loaded stable hash and the new one match.
             if let Some(prev_index) = data.previous.node_to_index_opt(&node) {
-                let dep_node_index = data.current.prev_index_to_index.lock()[prev_index];
+                let dep_node_index = data.current.with_prev_index_to_index(|prev_index_to_index| {
+                    prev_index_to_index[prev_index]
+                });
                 if let Some(dep_node_index) = dep_node_index {
                     crate::query::incremental_verify_ich(
                         cx,
@@ -628,11 +632,9 @@ impl<K: DepKind> DepGraphData<K> {
     #[inline]
     pub fn dep_node_index_of_opt(&self, dep_node: &DepNode<K>) -> Option<DepNodeIndex> {
         if let Some(prev_index) = self.previous.node_to_index_opt(dep_node) {
-            self.current.prev_index_to_index.with_borrow(|nodes| nodes[prev_index])
+            self.current.with_prev_index_to_index(|nodes| nodes[prev_index])
         } else {
-            self.current
-                .new_node_to_index
-                .with_get_shard_by_value(dep_node, |node| node.get(dep_node).copied())
+            self.current.with_new_node_to_index(|node| node.get(dep_node).copied())
         }
     }
 
@@ -989,16 +991,20 @@ impl<K: DepKind> DepGraph<K> {
 
     pub fn print_incremental_info(&self) {
         if let Some(data) = &self.data {
-            data.current.encoder.borrow().print_incremental_info(
+            data.current.print_incremental_info_encoder(
                 data.current.total_read_count.load(Relaxed),
                 data.current.total_duplicate_read_count.load(Relaxed),
-            )
+            );
         }
     }
 
     pub fn encode(&self, profiler: &SelfProfilerRef) -> FileEncodeResult {
         if let Some(data) = &self.data {
-            data.current.encoder.steal().finish(profiler)
+            if data.current.single_thread {
+                data.current.single_inner.encoder.steal().finish(profiler)
+            } else {
+                data.current.parallel_inner.encoder.steal().finish(profiler)
+            }
         } else {
             Ok(0)
         }
@@ -1082,10 +1088,9 @@ rustc_index::newtype_index! {
 /// manipulating both, we acquire `new_node_to_index` or `prev_index_to_index`
 /// first, and `data` second.
 pub(super) struct CurrentDepGraph<K: DepKind> {
-    encoder: Steal<GraphEncoder<K>>,
-    new_node_to_index: Sharded<FxHashMap<DepNode<K>, DepNodeIndex>>,
-    prev_index_to_index: Lock<IndexVec<SerializedDepNodeIndex, Option<DepNodeIndex>>>,
-
+    single_thread: bool,
+    single_inner: CurrentDepGraphInner<K, SRefCell>,
+    parallel_inner: CurrentDepGraphInner<K, SMutex>,
     /// This is used to verify that fingerprints do not change between the creation of a node
     /// and its recomputation.
     #[cfg(debug_assertions)]
@@ -1119,6 +1124,15 @@ pub(super) struct CurrentDepGraph<K: DepKind> {
     /// which may incur too much overhead.
     /// This will be None if self-profiling is disabled.
     node_intern_event_id: Option<EventId>,
+}
+
+// just for speed test
+unsafe impl<K: DepKind> Sync for CurrentDepGraph<K> {}
+
+struct CurrentDepGraphInner<K: DepKind, L: SLock> {
+    encoder: Steal<GraphEncoder<K, L>>,
+    new_node_to_index: L::Lock<FxHashMap<DepNode<K>, DepNodeIndex>>,
+    prev_index_to_index: L::Lock<IndexVec<SerializedDepNodeIndex, Option<DepNodeIndex>>>,
 }
 
 impl<K: DepKind> CurrentDepGraph<K> {
@@ -1157,17 +1171,49 @@ impl<K: DepKind> CurrentDepGraph<K> {
             .get_or_alloc_cached_string("incr_comp_intern_dep_graph_node")
             .map(EventId::from_label);
 
+        let single_thread = !rustc_data_structures::sync::active();
+        let (single_encoder, parallel_encoder) =
+            if single_thread { (Some(encoder), None) } else { (None, Some(encoder)) };
+
         CurrentDepGraph {
-            encoder: Steal::new(GraphEncoder::new(
-                encoder,
-                prev_graph_node_count,
-                record_graph,
-                record_stats,
-            )),
-            new_node_to_index: Sharded::new(|| {
-                FxHashMap::with_capacity_and_hasher(new_node_count_estimate, Default::default())
-            }),
-            prev_index_to_index: Lock::new(IndexVec::from_elem_n(None, prev_graph_node_count)),
+            single_thread,
+            single_inner: CurrentDepGraphInner {
+                encoder: Steal::new(GraphEncoder::new(
+                    single_encoder,
+                    prev_graph_node_count,
+                    record_graph,
+                    record_stats,
+                )),
+                new_node_to_index: <SRefCell as SLock>::Lock::new(
+                    FxHashMap::with_capacity_and_hasher(
+                        new_node_count_estimate,
+                        Default::default(),
+                    ),
+                ),
+                prev_index_to_index: <SRefCell as SLock>::Lock::new(IndexVec::from_elem_n(
+                    None,
+                    prev_graph_node_count,
+                )),
+            },
+            parallel_inner: CurrentDepGraphInner {
+                encoder: Steal::new(GraphEncoder::new(
+                    parallel_encoder,
+                    prev_graph_node_count,
+                    record_graph,
+                    record_stats,
+                )),
+                new_node_to_index: <SMutex as SLock>::Lock::new(
+                    FxHashMap::with_capacity_and_hasher(
+                        new_node_count_estimate,
+                        Default::default(),
+                    ),
+                ),
+                prev_index_to_index: <SMutex as SLock>::Lock::new(IndexVec::from_elem_n(
+                    None,
+                    prev_graph_node_count,
+                )),
+            },
+
             anon_id_seed,
             #[cfg(debug_assertions)]
             forbidden_edge,
@@ -1198,16 +1244,14 @@ impl<K: DepKind> CurrentDepGraph<K> {
         edges: EdgesVec,
         current_fingerprint: Fingerprint,
     ) -> DepNodeIndex {
-        let dep_node_index =
-            self.new_node_to_index.with_get_shard_by_value(&key, |node| match node.entry(key) {
-                Entry::Occupied(entry) => *entry.get(),
-                Entry::Vacant(entry) => {
-                    let dep_node_index =
-                        self.encoder.borrow().send(profiler, key, current_fingerprint, edges);
-                    entry.insert(dep_node_index);
-                    dep_node_index
-                }
-            });
+        let dep_node_index = self.with_new_node_to_index(|node| match node.entry(key) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                let dep_node_index = self.send_encoder(profiler, key, current_fingerprint, edges);
+                entry.insert(dep_node_index);
+                dep_node_index
+            }
+        });
 
         #[cfg(debug_assertions)]
         self.record_edge(dep_node_index, key, current_fingerprint);
@@ -1236,17 +1280,18 @@ impl<K: DepKind> CurrentDepGraph<K> {
                     eprintln!("[task::{color:}] {key:?}");
                 }
 
-                let mut prev_index_to_index = self.prev_index_to_index.lock();
-
-                let dep_node_index = match prev_index_to_index[prev_index] {
-                    Some(dep_node_index) => dep_node_index,
-                    None => {
-                        let dep_node_index =
-                            self.encoder.borrow().send(profiler, key, fingerprint, edges);
-                        prev_index_to_index[prev_index] = Some(dep_node_index);
-                        dep_node_index
-                    }
-                };
+                let dep_node_index =
+                    self.with_prev_index_to_index(|prev_index_to_index| match prev_index_to_index
+                        [prev_index]
+                    {
+                        Some(dep_node_index) => dep_node_index,
+                        None => {
+                            let dep_node_index =
+                                self.send_encoder(profiler, key, fingerprint, edges);
+                            prev_index_to_index[prev_index] = Some(dep_node_index);
+                            dep_node_index
+                        }
+                    });
 
                 #[cfg(debug_assertions)]
                 self.record_edge(dep_node_index, key, fingerprint);
@@ -1297,26 +1342,97 @@ impl<K: DepKind> CurrentDepGraph<K> {
     ) -> DepNodeIndex {
         self.debug_assert_not_in_new_nodes(prev_graph, prev_index);
 
-        self.prev_index_to_index.with_lock(|prev_index_to_index| {
-            match prev_index_to_index[prev_index] {
-                Some(dep_node_index) => dep_node_index,
-                None => {
-                    let key = prev_graph.index_to_node(prev_index);
-                    let edges = prev_graph
-                        .edge_targets_from(prev_index)
-                        .iter()
-                        .map(|i| prev_index_to_index[*i].unwrap())
-                        .collect();
-                    let fingerprint = prev_graph.fingerprint_by_index(prev_index);
-                    let dep_node_index =
-                        self.encoder.borrow().send(profiler, key, fingerprint, edges);
-                    prev_index_to_index[prev_index] = Some(dep_node_index);
-                    #[cfg(debug_assertions)]
-                    self.record_edge(dep_node_index, key, fingerprint);
-                    dep_node_index
-                }
+        self.with_prev_index_to_index(|prev_index_to_index| match prev_index_to_index[prev_index] {
+            Some(dep_node_index) => dep_node_index,
+            None => {
+                let key = prev_graph.index_to_node(prev_index);
+                let edges = prev_graph
+                    .edge_targets_from(prev_index)
+                    .iter()
+                    .map(|i| prev_index_to_index[*i].unwrap())
+                    .collect();
+                let fingerprint = prev_graph.fingerprint_by_index(prev_index);
+                let dep_node_index = self.send_encoder(profiler, key, fingerprint, edges);
+                prev_index_to_index[prev_index] = Some(dep_node_index);
+                #[cfg(debug_assertions)]
+                self.record_edge(dep_node_index, key, fingerprint);
+                dep_node_index
             }
         })
+    }
+
+    #[inline]
+    fn with_prev_index_to_index<
+        F: FnOnce(&mut IndexVec<SerializedDepNodeIndex, Option<DepNodeIndex>>) -> R,
+        R,
+    >(
+        &self,
+        f: F,
+    ) -> R {
+        if likely(self.single_thread) {
+            let mut lock = self.single_inner.prev_index_to_index.lock();
+            f(&mut *lock)
+        } else {
+            let mut lock = LockLike::lock(&self.parallel_inner.prev_index_to_index);
+            f(&mut *lock)
+        }
+    }
+
+    #[inline]
+    fn with_new_node_to_index<F: FnOnce(&mut FxHashMap<DepNode<K>, DepNodeIndex>) -> R, R>(
+        &self,
+        f: F,
+    ) -> R {
+        if likely(self.single_thread) {
+            let mut lock = self.single_inner.new_node_to_index.lock();
+            f(&mut *lock)
+        } else {
+            let mut lock = LockLike::lock(&self.parallel_inner.new_node_to_index);
+            f(&mut *lock)
+        }
+    }
+
+    #[inline]
+    fn with_query_encoder(&self, f: impl Fn(&DepGraphQuery<K>)) {
+        if likely(self.single_thread) {
+            self.single_inner.encoder.borrow().with_query(f)
+        } else {
+            self.parallel_inner.encoder.borrow().with_query(f)
+        }
+    }
+
+    #[inline]
+    fn print_incremental_info_encoder(
+        &self,
+        total_read_count: u64,
+        total_duplicate_read_count: u64,
+    ) {
+        if likely(self.single_thread) {
+            self.single_inner
+                .encoder
+                .borrow()
+                .print_incremental_info(total_read_count, total_duplicate_read_count)
+        } else {
+            self.parallel_inner
+                .encoder
+                .borrow()
+                .print_incremental_info(total_read_count, total_duplicate_read_count)
+        }
+    }
+
+    #[inline]
+    fn send_encoder(
+        &self,
+        profiler: &SelfProfilerRef,
+        node: DepNode<K>,
+        fingerprint: Fingerprint,
+        edges: SmallVec<[DepNodeIndex; 8]>,
+    ) -> DepNodeIndex {
+        if likely(self.single_thread) {
+            self.single_inner.encoder.borrow().send(profiler, node, fingerprint, edges)
+        } else {
+            self.parallel_inner.encoder.borrow().send(profiler, node, fingerprint, edges)
+        }
     }
 
     #[inline]
@@ -1327,7 +1443,7 @@ impl<K: DepKind> CurrentDepGraph<K> {
     ) {
         let node = &prev_graph.index_to_node(prev_index);
         debug_assert!(
-            !self.new_node_to_index.with_get_shard_by_value(node, |lock| lock.contains_key(node)),
+            !self.with_new_node_to_index(|lock| lock.contains_key(node)),
             "node from previous graph present in new node collection"
         );
     }
