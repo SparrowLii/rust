@@ -79,6 +79,7 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::intrinsics::likely;
 use std::iter;
 use std::mem;
 use std::ops::{Bound, Deref};
@@ -124,8 +125,8 @@ type InternedSet<'tcx, T, L> = ShardedHashMap<InternedInSet<'tcx, T>, (), L>;
 
 pub struct CtxtInterners<'tcx> {
     single_thread: bool,
-    inner: CtxtInternersInner<'tcx, SRefCell>,
-    mt_inner: CtxtInternersInner<'tcx, SMutex>,
+    single_inner: CtxtInternersInner<'tcx, SRefCell>,
+    parallel_inner: CtxtInternersInner<'tcx, SMutex>,
 }
 
 // just for speed test
@@ -160,8 +161,8 @@ struct CtxtInternersInner<'tcx, L: SLock> {
 impl<'tcx> CtxtInterners<'tcx> {
     fn new(arena: &'tcx WorkerLocal<Arena<'tcx>>) -> CtxtInterners<'tcx> {
         CtxtInterners {
-            single_thread: true,
-            inner: CtxtInternersInner {
+            single_thread: !sync::active(),
+            single_inner: CtxtInternersInner {
                 arena,
                 type_: Default::default(),
                 const_lists: Default::default(),
@@ -182,7 +183,7 @@ impl<'tcx> CtxtInterners<'tcx> {
                 external_constraints: Default::default(),
                 fields: Default::default(),
             },
-            mt_inner: CtxtInternersInner {
+            parallel_inner: CtxtInternersInner {
                 arena,
                 type_: Default::default(),
                 const_lists: Default::default(),
@@ -210,22 +211,41 @@ impl<'tcx> CtxtInterners<'tcx> {
     #[allow(rustc::usage_of_ty_tykind)]
     #[inline(never)]
     fn intern_ty(&self, kind: TyKind<'tcx>, sess: &Session, untracked: &Untracked) -> Ty<'tcx> {
-        Ty(Interned::new_unchecked(
-            self.inner
-                .type_
-                .intern(kind, |kind| {
-                    let flags = super::flags::FlagComputation::for_kind(&kind);
-                    let stable_hash = self.stable_hash(&flags, sess, untracked, &kind);
+        if likely(self.single_thread) {
+            Ty(Interned::new_unchecked(
+                self.single_inner
+                    .type_
+                    .intern(kind, |kind| {
+                        let flags = super::flags::FlagComputation::for_kind(&kind);
+                        let stable_hash = self.stable_hash(&flags, sess, untracked, &kind);
 
-                    InternedInSet(self.inner.arena.alloc(WithCachedTypeInfo {
-                        internee: kind,
-                        stable_hash,
-                        flags: flags.flags,
-                        outer_exclusive_binder: flags.outer_exclusive_binder,
-                    }))
-                })
-                .0,
-        ))
+                        InternedInSet(self.single_inner.arena.alloc(WithCachedTypeInfo {
+                            internee: kind,
+                            stable_hash,
+                            flags: flags.flags,
+                            outer_exclusive_binder: flags.outer_exclusive_binder,
+                        }))
+                    })
+                    .0,
+            ))
+        } else {
+            Ty(Interned::new_unchecked(
+                self.parallel_inner
+                    .type_
+                    .intern(kind, |kind| {
+                        let flags = super::flags::FlagComputation::for_kind(&kind);
+                        let stable_hash = self.stable_hash(&flags, sess, untracked, &kind);
+
+                        InternedInSet(self.parallel_inner.arena.alloc(WithCachedTypeInfo {
+                            internee: kind,
+                            stable_hash,
+                            flags: flags.flags,
+                            outer_exclusive_binder: flags.outer_exclusive_binder,
+                        }))
+                    })
+                    .0,
+            ))
+        }
     }
 
     fn stable_hash<'a, T: HashStable<StableHashingContext<'a>>>(
@@ -255,23 +275,43 @@ impl<'tcx> CtxtInterners<'tcx> {
         sess: &Session,
         untracked: &Untracked,
     ) -> Predicate<'tcx> {
-        Predicate(Interned::new_unchecked(
-            self.inner
-                .predicate
-                .intern(kind, |kind| {
-                    let flags = super::flags::FlagComputation::for_predicate(kind);
+        if likely(self.single_thread) {
+            Predicate(Interned::new_unchecked(
+                self.single_inner
+                    .predicate
+                    .intern(kind, |kind| {
+                        let flags = super::flags::FlagComputation::for_predicate(kind);
 
-                    let stable_hash = self.stable_hash(&flags, sess, untracked, &kind);
+                        let stable_hash = self.stable_hash(&flags, sess, untracked, &kind);
 
-                    InternedInSet(self.inner.arena.alloc(WithCachedTypeInfo {
-                        internee: kind,
-                        stable_hash,
-                        flags: flags.flags,
-                        outer_exclusive_binder: flags.outer_exclusive_binder,
-                    }))
-                })
-                .0,
-        ))
+                        InternedInSet(self.single_inner.arena.alloc(WithCachedTypeInfo {
+                            internee: kind,
+                            stable_hash,
+                            flags: flags.flags,
+                            outer_exclusive_binder: flags.outer_exclusive_binder,
+                        }))
+                    })
+                    .0,
+            ))
+        } else {
+            Predicate(Interned::new_unchecked(
+                self.parallel_inner
+                    .predicate
+                    .intern(kind, |kind| {
+                        let flags = super::flags::FlagComputation::for_predicate(kind);
+
+                        let stable_hash = self.stable_hash(&flags, sess, untracked, &kind);
+
+                        InternedInSet(self.parallel_inner.arena.alloc(WithCachedTypeInfo {
+                            internee: kind,
+                            stable_hash,
+                            flags: flags.flags,
+                            outer_exclusive_binder: flags.outer_exclusive_binder,
+                        }))
+                    })
+                    .0,
+            ))
+        }
     }
 }
 
@@ -402,13 +442,23 @@ impl<'tcx> CommonTypes<'tcx> {
 impl<'tcx> CommonLifetimes<'tcx> {
     fn new(interners: &CtxtInterners<'tcx>) -> CommonLifetimes<'tcx> {
         let mk = |r| {
-            Region(Interned::new_unchecked(
-                interners
-                    .inner
-                    .region
-                    .intern(r, |r| InternedInSet(interners.inner.arena.alloc(r)))
-                    .0,
-            ))
+            if likely(interners.single_thread) {
+                Region(Interned::new_unchecked(
+                    interners
+                        .single_inner
+                        .region
+                        .intern(r, |r| InternedInSet(interners.single_inner.arena.alloc(r)))
+                        .0,
+                ))
+            } else {
+                Region(Interned::new_unchecked(
+                    interners
+                        .parallel_inner
+                        .region
+                        .intern(r, |r| InternedInSet(interners.parallel_inner.arena.alloc(r)))
+                        .0,
+                ))
+            }
         };
 
         let re_vars =
@@ -439,13 +489,23 @@ impl<'tcx> CommonLifetimes<'tcx> {
 impl<'tcx> CommonConsts<'tcx> {
     fn new(interners: &CtxtInterners<'tcx>, types: &CommonTypes<'tcx>) -> CommonConsts<'tcx> {
         let mk_const = |c| {
-            Const(Interned::new_unchecked(
-                interners
-                    .inner
-                    .const_
-                    .intern(c, |c| InternedInSet(interners.inner.arena.alloc(c)))
-                    .0,
-            ))
+            if likely(interners.single_thread) {
+                Const(Interned::new_unchecked(
+                    interners
+                        .single_inner
+                        .const_
+                        .intern(c, |c| InternedInSet(interners.single_inner.arena.alloc(c)))
+                        .0,
+                ))
+            } else {
+                Const(Interned::new_unchecked(
+                    interners
+                        .parallel_inner
+                        .const_
+                        .intern(c, |c| InternedInSet(interners.parallel_inner.arena.alloc(c)))
+                        .0,
+                ))
+            }
         };
 
         CommonConsts {
@@ -1282,9 +1342,9 @@ macro_rules! nop_lift {
         impl<'a, 'tcx> Lift<'tcx> for $ty {
             type Lifted = $lifted;
             fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
-                if tcx.interners.single_thread {
+                if std::intrinsics::likely(tcx.interners.single_thread) {
                     tcx.interners
-                        .inner
+                        .single_inner
                         .$set
                         .contains_pointer_to(&InternedInSet(&*self.0.0))
                         // SAFETY: `self` is interned and therefore valid
@@ -1292,7 +1352,7 @@ macro_rules! nop_lift {
                         .then(|| unsafe { mem::transmute(self) })
                 } else {
                     tcx.interners
-                        .mt_inner
+                        .parallel_inner
                         .$set
                         .contains_pointer_to(&InternedInSet(&*self.0.0))
                         // SAFETY: `self` is interned and therefore valid
@@ -1312,15 +1372,15 @@ macro_rules! nop_list_lift {
                 if self.is_empty() {
                     return Some(List::empty());
                 }
-                if tcx.interners.single_thread {
+                if std::intrinsics::likely(tcx.interners.single_thread) {
                     tcx.interners
-                        .inner
+                        .single_inner
                         .$set
                         .contains_pointer_to(&InternedInSet(self))
                         .then(|| unsafe { mem::transmute(self) })
                 } else {
                     tcx.interners
-                        .mt_inner
+                        .parallel_inner
                         .$set
                         .contains_pointer_to(&InternedInSet(self))
                         .then(|| unsafe { mem::transmute(self) })
@@ -1382,26 +1442,50 @@ macro_rules! sty_debug_print {
                 };
                 $(let mut $variant = total;)*
 
-                let shards = tcx.interners.inner.type_.shard.lock();
-                let types = shards.keys();
-                for &InternedInSet(t) in types {
-                    let variant = match t.internee {
-                        ty::Bool | ty::Char | ty::Int(..) | ty::Uint(..) |
-                            ty::Float(..) | ty::Str | ty::Never => continue,
-                        ty::Error(_) => /* unimportant */ continue,
-                        $(ty::$variant(..) => &mut $variant,)*
-                    };
-                    let lt = t.flags.intersects(ty::TypeFlags::HAS_RE_INFER);
-                    let ty = t.flags.intersects(ty::TypeFlags::HAS_TY_INFER);
-                    let ct = t.flags.intersects(ty::TypeFlags::HAS_CT_INFER);
+                if tcx.interners.single_thread {
+                    let shard = tcx.interners.single_inner.type_.shard.lock();
+                    let types = shard.keys();
+                    for &InternedInSet(t) in types {
+                        let variant = match t.internee {
+                            ty::Bool | ty::Char | ty::Int(..) | ty::Uint(..) |
+                                ty::Float(..) | ty::Str | ty::Never => continue,
+                            ty::Error(_) => /* unimportant */ continue,
+                            $(ty::$variant(..) => &mut $variant,)*
+                        };
+                        let lt = t.flags.intersects(ty::TypeFlags::HAS_RE_INFER);
+                        let ty = t.flags.intersects(ty::TypeFlags::HAS_TY_INFER);
+                        let ct = t.flags.intersects(ty::TypeFlags::HAS_CT_INFER);
 
-                    variant.total += 1;
-                    total.total += 1;
-                    if lt { total.lt_infer += 1; variant.lt_infer += 1 }
-                    if ty { total.ty_infer += 1; variant.ty_infer += 1 }
-                    if ct { total.ct_infer += 1; variant.ct_infer += 1 }
-                    if lt && ty && ct { total.all_infer += 1; variant.all_infer += 1 }
-                }
+                        variant.total += 1;
+                        total.total += 1;
+                        if lt { total.lt_infer += 1; variant.lt_infer += 1 }
+                        if ty { total.ty_infer += 1; variant.ty_infer += 1 }
+                        if ct { total.ct_infer += 1; variant.ct_infer += 1 }
+                        if lt && ty && ct { total.all_infer += 1; variant.all_infer += 1 }
+                    }
+                } else {
+                    let shard = LockLike::lock(&tcx.interners.parallel_inner.type_.shard);
+                    let types = shard.keys();
+                    for &InternedInSet(t) in types {
+                        let variant = match t.internee {
+                            ty::Bool | ty::Char | ty::Int(..) | ty::Uint(..) |
+                                ty::Float(..) | ty::Str | ty::Never => continue,
+                            ty::Error(_) => /* unimportant */ continue,
+                            $(ty::$variant(..) => &mut $variant,)*
+                        };
+                        let lt = t.flags.intersects(ty::TypeFlags::HAS_RE_INFER);
+                        let ty = t.flags.intersects(ty::TypeFlags::HAS_TY_INFER);
+                        let ct = t.flags.intersects(ty::TypeFlags::HAS_CT_INFER);
+
+                        variant.total += 1;
+                        total.total += 1;
+                        if lt { total.lt_infer += 1; variant.lt_infer += 1 }
+                        if ty { total.ty_infer += 1; variant.ty_infer += 1 }
+                        if ct { total.ct_infer += 1; variant.ct_infer += 1 }
+                        if lt && ty && ct { total.all_infer += 1; variant.all_infer += 1 }
+                    }
+                };
+
                 writeln!(fmt, "Ty interner             total           ty lt ct all")?;
                 $(writeln!(fmt, "    {:18}: {uses:6} {usespc:4.1}%, \
                             {ty:4.1}% {lt:5.1}% {ct:4.1}% {all:4.1}%",
@@ -1457,14 +1541,49 @@ impl<'tcx> TyCtxt<'tcx> {
                     Foreign
                 )?;
 
-                writeln!(fmt, "InternalSubsts interner: #{}", self.0.interners.inner.substs.len())?;
-                writeln!(fmt, "Region interner: #{}", self.0.interners.inner.region.len())?;
-                writeln!(
-                    fmt,
-                    "Const Allocation interner: #{}",
-                    self.0.interners.inner.const_allocation.len()
-                )?;
-                writeln!(fmt, "Layout interner: #{}", self.0.interners.inner.layout.len())?;
+                if likely(self.0.interners.single_thread) {
+                    writeln!(
+                        fmt,
+                        "InternalSubsts interner: #{}",
+                        self.0.interners.single_inner.substs.len()
+                    )?;
+                    writeln!(
+                        fmt,
+                        "Region interner: #{}",
+                        self.0.interners.single_inner.region.len()
+                    )?;
+                    writeln!(
+                        fmt,
+                        "Const Allocation interner: #{}",
+                        self.0.interners.single_inner.const_allocation.len()
+                    )?;
+                    writeln!(
+                        fmt,
+                        "Layout interner: #{}",
+                        self.0.interners.single_inner.layout.len()
+                    )?;
+                } else {
+                    writeln!(
+                        fmt,
+                        "InternalSubsts interner: #{}",
+                        self.0.interners.parallel_inner.substs.len()
+                    )?;
+                    writeln!(
+                        fmt,
+                        "Region interner: #{}",
+                        self.0.interners.parallel_inner.region.len()
+                    )?;
+                    writeln!(
+                        fmt,
+                        "Const Allocation interner: #{}",
+                        self.0.interners.parallel_inner.const_allocation.len()
+                    )?;
+                    writeln!(
+                        fmt,
+                        "Layout interner: #{}",
+                        self.0.interners.parallel_inner.layout.len()
+                    )?;
+                }
 
                 Ok(())
             }
@@ -1571,12 +1690,12 @@ macro_rules! direct_interners {
             $vis fn $method(self, v: $ty) -> $ret_ty {
                 $ret_ctor(Interned::new_unchecked(
                     if self.interners.single_thread {
-                        self.interners.inner.$name.intern(v, |v| {
-                            InternedInSet(self.interners.inner.arena.alloc(v))
+                        self.interners.single_inner.$name.intern(v, |v| {
+                            InternedInSet(self.interners.single_inner.arena.alloc(v))
                         }).0
                     } else {
-                        self.interners.mt_inner.$name.intern(v, |v| {
-                            InternedInSet(self.interners.mt_inner.arena.alloc(v))
+                        self.interners.parallel_inner.$name.intern(v, |v| {
+                            InternedInSet(self.interners.parallel_inner.arena.alloc(v))
                         }).0
                     }
                 ))
@@ -1605,11 +1724,11 @@ macro_rules! slice_interners {
                 if v.is_empty() {
                     List::empty()
                 } else if self.interners.single_thread {
-                    self.interners.inner.$field.intern_ref(v, || {
+                    self.interners.single_inner.$field.intern_ref(v, || {
                         InternedInSet(List::from_arena(&*self.arena, v))
                     }).0
                 } else {
-                    self.interners.mt_inner.$field.intern_ref(v, || {
+                    self.interners.parallel_inner.$field.intern_ref(v, || {
                         InternedInSet(List::from_arena(&*self.arena, v))
                     }).0
                 }
