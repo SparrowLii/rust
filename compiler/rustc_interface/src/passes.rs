@@ -743,6 +743,9 @@ pub fn create_global_ctxt<'tcx>(
 /// Runs the type-checking, region checking and other miscellaneous analysis
 /// passes on the crate.
 fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
+    tcx.ensure().hir_crate_items(());
+    tcx.ensure().stability_index(());
+
     rustc_passes::hir_id_validator::check_crate(tcx);
 
     let sess = tcx.sess;

@@ -117,14 +117,15 @@ impl ShallowLintLevelMap {
     /// Perform a deep probe in the HIR tree looking for the actual level for the lint.
     /// This lint level is not usable for diagnostics, it needs to be corrected by
     /// `reveal_actual_level` beforehand.
-    #[instrument(level = "trace", skip(self, tcx), ret)]
+    // #[instrument(level = "trace", skip(self, tcx), ret)]
     fn probe_for_lint_level(
         &self,
-        tcx: TyCtxt<'_>,
-        id: LintId,
-        start: HirId,
+        _tcx: TyCtxt<'_>,
+        _id: LintId,
+        _start: HirId,
     ) -> (Option<Level>, LintLevelSource) {
-        if let Some(map) = self.specs.get(&start.local_id)
+        return (Some(Level::Allow), LintLevelSource::Default)
+        /*if let Some(map) = self.specs.get(&start.local_id)
             && let Some(&(level, src)) = map.get(&id)
         {
             return (Some(level), src);
@@ -145,7 +146,7 @@ impl ShallowLintLevelMap {
             }
         }
 
-        (None, LintLevelSource::Default)
+        (None, LintLevelSource::Default)*/
     }
 
     /// Fetch and return the user-visible lint level for the given lint at the given HirId.
@@ -166,8 +167,9 @@ impl ShallowLintLevelMap {
 
 impl TyCtxt<'_> {
     /// Fetch and return the user-visible lint level for the given lint at the given HirId.
-    pub fn lint_level_at_node(self, lint: &'static Lint, id: HirId) -> (Level, LintLevelSource) {
-        self.shallow_lint_levels_on(id.owner).lint_level_id_at_node(self, LintId::of(lint), id)
+    pub fn lint_level_at_node(self, _lint: &'static Lint, _id: HirId) -> (Level, LintLevelSource) {
+        return (Level::Allow, LintLevelSource::Default)
+        //self.shallow_lint_levels_on(id.owner).lint_level_id_at_node(self, LintId::of(lint), id)
     }
 }
 
