@@ -464,6 +464,13 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
 
     let resolver = ResolverSync::new(&mut resolver);
 
+    if let AstOwner::Crate(c) = ast_index[CRATE_DEF_ID] {
+        item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, owners: &owners }
+            .lower_crate(c);
+    } else {
+        unreachable!()
+    }
+
     rustc_data_structures::sync::par_for_each_in(0..ast_index.len(), |def_id| {
         let def_id = LocalDefId::new(def_id);
         if let AstOwner::Item(item) = ast_index[def_id] {
@@ -472,11 +479,13 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
         }
     });
 
-    /*rustc_data_structures::sync::par_for_each_in(0..ast_index.len(), |def_id| {
+    rustc_data_structures::sync::par_for_each_in(0..ast_index.len(), |def_id| {
         let def_id = LocalDefId::new(def_id);
-        item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, owners: &owners }
-            .lower_node(def_id);
-    });*/
+        if let AstOwner::AssocItem(item, ctxt) = ast_index[def_id] {
+            item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, owners: &owners }
+                .lower_assoc_item(item, ctxt);
+        }
+    });
 
     for def_id in ast_index.indices() {
         item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, owners: &owners }

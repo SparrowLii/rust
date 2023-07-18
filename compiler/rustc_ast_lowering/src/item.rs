@@ -120,7 +120,7 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
     }
 
     #[instrument(level = "debug", skip(self, c))]
-    fn lower_crate(&mut self, c: &Crate) {
+    pub(super) fn lower_crate(&mut self, c: &Crate) {
         debug_assert_eq!(self.resolver.r.node_id_to_def_id[&CRATE_NODE_ID], CRATE_DEF_ID);
         self.with_lctx(CRATE_NODE_ID, |lctx| {
             let module = lctx.lower_mod(&c.items, &c.spans);
@@ -134,7 +134,7 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
         self.with_lctx(item.id, |lctx| hir::OwnerNode::Item(lctx.lower_item(item)))
     }
 
-    fn lower_assoc_item(&mut self, item: &AssocItem, ctxt: AssocCtxt) {
+    pub(super) fn lower_assoc_item(&mut self, item: &AssocItem, ctxt: AssocCtxt) {
         let def_id = self.resolver.r.node_id_to_def_id[&item.id];
 
         let parent_id = self.tcx.local_parent(def_id);
