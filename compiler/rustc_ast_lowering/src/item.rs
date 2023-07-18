@@ -8,13 +8,14 @@ use rustc_ast::ptr::P;
 use rustc_ast::visit::AssocCtxt;
 use rustc_ast::*;
 use rustc_data_structures::sorted_map::SortedMap;
+use rustc_data_structures::sync::Lock;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{LocalDefId, CRATE_DEF_ID};
 use rustc_hir::PredicateOrigin;
 use rustc_index::{Idx, IndexSlice, IndexVec};
-use rustc_middle::ty::{ResolverAstLowering, TyCtxt};
+use rustc_middle::ty::{ResolverSync, TyCtxt};
 use rustc_span::edit_distance::find_best_match_for_name;
 use rustc_span::source_map::DesugaringKind;
 use rustc_span::symbol::{kw, sym, Ident};
@@ -25,9 +26,9 @@ use thin_vec::ThinVec;
 
 pub(super) struct ItemLowerer<'a, 'hir> {
     pub(super) tcx: TyCtxt<'hir>,
-    pub(super) resolver: &'a mut ResolverAstLowering,
+    pub(super) resolver: &'a ResolverSync<'a>,
     pub(super) ast_index: &'a IndexSlice<LocalDefId, AstOwner<'a>>,
-    pub(super) owners: &'a mut IndexVec<LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>>,
+    pub(super) owners: &'a Lock<IndexVec<LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>>>,
 }
 
 /// When we have a ty alias we *may* have two where clauses. To give the best diagnostics, we set the span
@@ -88,8 +89,9 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
         };
         lctx.with_hir_id_owner(owner, |lctx| f(lctx));
 
+        let mut owners = self.owners.lock();
         for (def_id, info) in lctx.children {
-            let owner = self.owners.ensure_contains_elem(def_id, || hir::MaybeOwner::Phantom);
+            let owner = owners.ensure_contains_elem(def_id, || hir::MaybeOwner::Phantom);
             debug_assert!(matches!(owner, hir::MaybeOwner::Phantom));
             *owner = info;
         }
@@ -99,8 +101,11 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
         &mut self,
         def_id: LocalDefId,
     ) -> hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>> {
-        let owner = self.owners.ensure_contains_elem(def_id, || hir::MaybeOwner::Phantom);
+        let mut lock = Some(self.owners.lock());
+        let owner =
+            lock.as_mut().unwrap().ensure_contains_elem(def_id, || hir::MaybeOwner::Phantom);
         if let hir::MaybeOwner::Phantom = owner {
+            lock = None;
             let node = self.ast_index[def_id];
             match node {
                 AstOwner::NonOwner => {}
@@ -111,12 +116,12 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
             }
         }
 
-        self.owners[def_id]
+        lock.map(|lock| lock[def_id]).unwrap_or_else(|| self.owners.lock()[def_id])
     }
 
     #[instrument(level = "debug", skip(self, c))]
     fn lower_crate(&mut self, c: &Crate) {
-        debug_assert_eq!(self.resolver.node_id_to_def_id[&CRATE_NODE_ID], CRATE_DEF_ID);
+        debug_assert_eq!(self.resolver.r.node_id_to_def_id[&CRATE_NODE_ID], CRATE_DEF_ID);
         self.with_lctx(CRATE_NODE_ID, |lctx| {
             let module = lctx.lower_mod(&c.items, &c.spans);
             lctx.lower_attrs(hir::CRATE_HIR_ID, &c.attrs);
@@ -125,12 +130,12 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
     }
 
     #[instrument(level = "debug", skip(self))]
-    fn lower_item(&mut self, item: &Item) {
+    pub(super) fn lower_item(&mut self, item: &Item) {
         self.with_lctx(item.id, |lctx| hir::OwnerNode::Item(lctx.lower_item(item)))
     }
 
     fn lower_assoc_item(&mut self, item: &AssocItem, ctxt: AssocCtxt) {
-        let def_id = self.resolver.node_id_to_def_id[&item.id];
+        let def_id = self.resolver.r.node_id_to_def_id[&item.id];
 
         let parent_id = self.tcx.local_parent(def_id);
         let parent_hir = self.lower_node(parent_id).unwrap();

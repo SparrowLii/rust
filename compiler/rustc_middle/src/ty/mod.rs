@@ -64,6 +64,10 @@ use std::mem;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::{fmt, str};
+use std::sync::atomic::AtomicU32;
+use rustc_ast::NodeId;
+use rustc_data_structures::sync::Lock;
+use rustc_data_structures::unord::UnordSet;
 
 pub use crate::ty::diagnostics::*;
 pub use rustc_type_ir::AliasKind::*;
@@ -215,6 +219,40 @@ pub struct ResolverAstLowering {
 
     /// Lints that were emitted by the resolver and early lints.
     pub lint_buffer: Steal<LintBuffer>,
+}
+
+#[derive(Debug)]
+pub struct ResolverSync<'a> {
+    pub r: &'a ResolverAstLowering,
+
+    pub new_node_id: NodeId,
+    pub partial_res_map: Lock<NodeMap<hir::def::PartialRes>>,
+
+    pub node_id_to_def_id: Lock<FxHashMap<ast::NodeId, LocalDefId>>,
+
+    pub extra_lifetime_params_map: Lock<NodeMap<Vec<(Ident, ast::NodeId, LifetimeRes)>>>,
+
+    pub next_node_id: AtomicU32,
+    pub trait_map_set: UnordSet<NodeId>,
+    pub trait_map: Lock<NodeMap<Vec<hir::TraitCandidate>>>,
+}
+
+impl<'a> ResolverSync<'a> {
+    pub fn new(r: &'a mut ResolverAstLowering) -> Self {
+        let extra_lifetime_params_map = Lock::new(std::mem::take(&mut r.extra_lifetime_params_map));
+        let trait_map_set: UnordSet<NodeId> = r.trait_map.items().map(|(key, _)| *key).collect();
+        let trait_map = Lock::new(std::mem::take(&mut r.trait_map));
+        ResolverSync {
+            r,
+            partial_res_map: Default::default(),
+            extra_lifetime_params_map,
+            node_id_to_def_id: Default::default(),
+            new_node_id: r.next_node_id,
+            next_node_id: AtomicU32::new(r.next_node_id.as_u32()),
+            trait_map_set,
+            trait_map,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

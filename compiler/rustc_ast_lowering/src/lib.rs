@@ -51,7 +51,7 @@ use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sorted_map::SortedMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_data_structures::sync::Lrc;
+use rustc_data_structures::sync::{Lock, Lrc};
 use rustc_errors::{
     DiagnosticArgFromDisplay, DiagnosticMessage, Handler, StashKey, SubdiagnosticMessage,
 };
@@ -64,7 +64,7 @@ use rustc_hir::{ConstArg, GenericArg, ItemLocalId, ParamName, TraitCandidate};
 use rustc_index::{Idx, IndexSlice, IndexVec};
 use rustc_middle::{
     span_bug,
-    ty::{ResolverAstLowering, TyCtxt},
+    ty::{ResolverSync, TyCtxt},
 };
 use rustc_session::parse::{add_feature_diagnostics, feature_err};
 use rustc_span::hygiene::MacroKind;
@@ -73,6 +73,7 @@ use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::{Span, DUMMY_SP};
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
+use std::sync::atomic::Ordering;
 use thin_vec::ThinVec;
 
 macro_rules! arena_vec {
@@ -96,7 +97,7 @@ fluent_messages! { "../messages.ftl" }
 
 struct LoweringContext<'a, 'hir> {
     tcx: TyCtxt<'hir>,
-    resolver: &'a mut ResolverAstLowering,
+    resolver: &'a ResolverSync<'a>,
 
     /// Used to allocate HIR nodes.
     arena: &'hir hir::Arena<'hir>,
@@ -151,14 +152,14 @@ trait ResolverAstLoweringExt {
     // Clones the resolution (if any) on 'source' and applies it
     // to 'target'. Used when desugaring a `UseTreeKind::Nested` to
     // multiple `UseTreeKind::Simple`s
-    fn clone_res(&mut self, source: NodeId, target: NodeId);
+    fn clone_res(&self, source: NodeId, target: NodeId);
     fn get_label_res(&self, id: NodeId) -> Option<NodeId>;
     fn get_lifetime_res(&self, id: NodeId) -> Option<LifetimeRes>;
-    fn take_extra_lifetime_params(&mut self, id: NodeId) -> Vec<(Ident, NodeId, LifetimeRes)>;
+    fn take_extra_lifetime_params(&self, id: NodeId) -> Vec<(Ident, NodeId, LifetimeRes)>;
     fn decl_macro_kind(&self, def_id: LocalDefId) -> MacroKind;
 }
 
-impl ResolverAstLoweringExt for ResolverAstLowering {
+impl ResolverAstLoweringExt for ResolverSync<'_> {
     fn legacy_const_generic_args(&self, expr: &Expr) -> Option<Vec<usize>> {
         if let ExprKind::Path(None, path) = &expr.kind {
             // Don't perform legacy const generics rewriting if the path already
@@ -167,7 +168,15 @@ impl ResolverAstLoweringExt for ResolverAstLowering {
                 return None;
             }
 
-            if let Res::Def(DefKind::Fn, def_id) = self.partial_res_map.get(&expr.id)?.full_res()? {
+            let res = if let Some(res) = self.r.partial_res_map.get(&expr.id) {
+                *res
+            } else if expr.id >= self.new_node_id && let Some(res) = self.partial_res_map.lock().get(&expr.id) {
+                *res
+            } else {
+                return None;
+            };
+
+            if let Res::Def(DefKind::Fn, def_id) = res.full_res()? {
                 // We only support cross-crate argument rewriting. Uses
                 // within the same crate should be updated to use the new
                 // const generics style.
@@ -175,7 +184,7 @@ impl ResolverAstLoweringExt for ResolverAstLowering {
                     return None;
                 }
 
-                if let Some(v) = self.legacy_const_generic_args.get(&def_id) {
+                if let Some(v) = self.r.legacy_const_generic_args.get(&def_id) {
                     return v.clone();
                 }
             }
@@ -184,30 +193,38 @@ impl ResolverAstLoweringExt for ResolverAstLowering {
         None
     }
 
-    fn clone_res(&mut self, source: NodeId, target: NodeId) {
-        if let Some(res) = self.partial_res_map.get(&source) {
-            self.partial_res_map.insert(target, *res);
+    fn clone_res(&self, source: NodeId, target: NodeId) {
+        if let Some(res) = self.r.partial_res_map.get(&source) {
+            self.partial_res_map.lock().insert(target, *res);
+        } else if source >= self.new_node_id {
+            let mut lock = self.partial_res_map.lock();
+            if let Some(res) = lock.get(&source) {
+                let res = *res;
+                lock.insert(target, res);
+            }
         }
     }
 
     /// Obtains resolution for a `NodeId` with a single resolution.
     fn get_partial_res(&self, id: NodeId) -> Option<PartialRes> {
-        self.partial_res_map.get(&id).copied()
+        self.r.partial_res_map.get(&id).copied().or_else(|| {
+            (id >= self.new_node_id).then(|| self.partial_res_map.lock().get(&id).copied())?
+        })
     }
 
     /// Obtains per-namespace resolutions for `use` statement with the given `NodeId`.
     fn get_import_res(&self, id: NodeId) -> PerNS<Option<Res<NodeId>>> {
-        self.import_res_map.get(&id).copied().unwrap_or_default()
+        self.r.import_res_map.get(&id).copied().unwrap_or_default()
     }
 
     /// Obtains resolution for a label with the given `NodeId`.
     fn get_label_res(&self, id: NodeId) -> Option<NodeId> {
-        self.label_res_map.get(&id).copied()
+        self.r.label_res_map.get(&id).copied()
     }
 
     /// Obtains resolution for a lifetime with the given `NodeId`.
     fn get_lifetime_res(&self, id: NodeId) -> Option<LifetimeRes> {
-        self.lifetimes_res_map.get(&id).copied()
+        self.r.lifetimes_res_map.get(&id).copied()
     }
 
     /// Obtain the list of lifetimes parameters to add to an item.
@@ -217,12 +234,12 @@ impl ResolverAstLoweringExt for ResolverAstLowering {
     ///
     /// The extra lifetimes that appear from the parenthesized `Fn`-trait desugaring
     /// should appear at the enclosing `PolyTraitRef`.
-    fn take_extra_lifetime_params(&mut self, id: NodeId) -> Vec<(Ident, NodeId, LifetimeRes)> {
-        self.extra_lifetime_params_map.remove(&id).unwrap_or_default()
+    fn take_extra_lifetime_params(&self, id: NodeId) -> Vec<(Ident, NodeId, LifetimeRes)> {
+        self.extra_lifetime_params_map.lock().remove(&id).unwrap_or_default()
     }
 
     fn decl_macro_kind(&self, def_id: LocalDefId) -> MacroKind {
-        self.builtin_macro_kinds.get(&def_id).copied().unwrap_or(MacroKind::Bang)
+        self.r.builtin_macro_kinds.get(&def_id).copied().unwrap_or(MacroKind::Bang)
     }
 }
 
@@ -439,20 +456,34 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
     let (mut resolver, krate) = tcx.resolver_for_lowering(()).steal();
 
     let ast_index = index_crate(&resolver.node_id_to_def_id, &krate);
-    let mut owners = IndexVec::from_fn_n(
+
+    let owners = Lock::new(IndexVec::from_fn_n(
         |_| hir::MaybeOwner::Phantom,
         tcx.definitions_untracked().def_index_count(),
-    );
+    ));
+
+    let resolver = ResolverSync::new(&mut resolver);
+
+    rustc_data_structures::sync::par_for_each_in(0..ast_index.len(), |def_id| {
+        let def_id = LocalDefId::new(def_id);
+        if let AstOwner::Item(item) = ast_index[def_id] {
+            item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, owners: &owners }
+                .lower_item(item);
+        }
+    });
+
+    /*rustc_data_structures::sync::par_for_each_in(0..ast_index.len(), |def_id| {
+        let def_id = LocalDefId::new(def_id);
+        item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, owners: &owners }
+            .lower_node(def_id);
+    });*/
 
     for def_id in ast_index.indices() {
-        item::ItemLowerer {
-            tcx,
-            resolver: &mut resolver,
-            ast_index: &ast_index,
-            owners: &mut owners,
-        }
-        .lower_node(def_id);
+        item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, owners: &owners }
+            .lower_node(def_id);
     }
+
+    let owners = owners.into_inner();
 
     // Drop AST to free memory
     drop(ast_index);
@@ -504,22 +535,26 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         let def_id = self.tcx.at(span).create_def(parent, data).def_id();
 
         debug!("create_def: def_id_to_node_id[{:?}] <-> {:?}", def_id, node_id);
-        self.resolver.node_id_to_def_id.insert(node_id, def_id);
+        self.resolver.node_id_to_def_id.lock().insert(node_id, def_id);
 
         def_id
     }
 
     fn next_node_id(&mut self) -> NodeId {
-        let start = self.resolver.next_node_id;
-        let next = start.as_u32().checked_add(1).expect("input too large; ran out of NodeIds");
-        self.resolver.next_node_id = ast::NodeId::from_u32(next);
-        start
+        let id = self.resolver.next_node_id.fetch_add(1, Ordering::Relaxed);
+        debug_assert!(id < u32::MAX, "input too large; ran out of NodeIds");
+        NodeId::from_u32(id)
     }
 
     /// Given the id of some node in the AST, finds the `LocalDefId` associated with it by the name
     /// resolver (if any).
     fn orig_opt_local_def_id(&self, node: NodeId) -> Option<LocalDefId> {
-        self.resolver.node_id_to_def_id.get(&node).map(|local_def_id| *local_def_id)
+        self.resolver
+            .r
+            .node_id_to_def_id
+            .get(&node)
+            .map(|local_def_id| *local_def_id)
+            .or_else(|| self.resolver.node_id_to_def_id.lock().get(&node).map(|id| *id))
     }
 
     fn orig_local_def_id(&self, node: NodeId) -> LocalDefId {
@@ -714,7 +749,8 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     self.children.push((def_id, hir::MaybeOwner::NonOwner(hir_id)));
                 }
 
-                if let Some(traits) = self.resolver.trait_map.remove(&ast_node_id) {
+                if self.resolver.trait_map_set.contains(&ast_node_id) &&
+                    let Some(traits) = self.resolver.trait_map.lock().remove(&ast_node_id) {
                     self.trait_map.insert(hir_id.local_id, traits.into_boxed_slice());
                 }
 
@@ -1550,7 +1586,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             hir::OpaqueTyOrigin::AsyncFn(..) | hir::OpaqueTyOrigin::FnReturn(..) => {
                 // in fn return position, like the `fn test<'a>() -> impl Debug + 'a` example,
                 // we only keep the lifetimes that appear in the `impl Debug` itself:
-                lifetime_collector::lifetimes_in_bounds(&self.resolver, bounds)
+                lifetime_collector::lifetimes_in_bounds(&self.resolver.r, bounds)
             }
         };
         debug!(?lifetimes_to_remap);
@@ -1865,7 +1901,11 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             inputs,
             output,
             c_variadic,
-            lifetime_elision_allowed: self.resolver.lifetime_elision_allowed.contains(&fn_node_id),
+            lifetime_elision_allowed: self
+                .resolver
+                .r
+                .lifetime_elision_allowed
+                .contains(&fn_node_id),
             implicit_self: decl.inputs.get(0).map_or(hir::ImplicitSelfKind::None, |arg| {
                 let is_mutable_pat = matches!(
                     arg.pat.kind,
@@ -2002,7 +2042,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         // find out exactly which ones those are.
         // in fn return position, like the `fn test<'a>() -> impl Debug + 'a` example,
         // we only keep the lifetimes that appear in the `impl Debug` itself:
-        let lifetimes_to_remap = lifetime_collector::lifetimes_in_ret_ty(&self.resolver, output);
+        let lifetimes_to_remap = lifetime_collector::lifetimes_in_ret_ty(&self.resolver.r, output);
         debug!(?lifetimes_to_remap);
 
         // If this opaque type is only capturing a subset of the lifetimes (those that appear in

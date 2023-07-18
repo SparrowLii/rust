@@ -1,4 +1,3 @@
-use super::ResolverAstLoweringExt;
 use rustc_ast::visit::{self, BoundKind, LifetimeCtxt, Visitor};
 use rustc_ast::{FnRetTy, GenericBounds, Lifetime, NodeId, PathSegment, PolyTraitRef, Ty, TyKind};
 use rustc_hir::def::LifetimeRes;
@@ -19,7 +18,7 @@ impl<'ast> LifetimeCollectVisitor<'ast> {
     }
 
     fn record_lifetime_use(&mut self, lifetime: Lifetime) {
-        match self.resolver.get_lifetime_res(lifetime.id).unwrap_or(LifetimeRes::Error) {
+        match self.resolver.lifetimes_res_map.get(&lifetime.id).copied().unwrap_or(LifetimeRes::Error) {
             LifetimeRes::Param { binder, .. } | LifetimeRes::Fresh { binder, .. } => {
                 if !self.current_binders.contains(&binder) {
                     if !self.collected_lifetimes.contains(&lifetime) {
@@ -48,7 +47,7 @@ impl<'ast> LifetimeCollectVisitor<'ast> {
     /// in the list start..end.
     fn record_elided_anchor(&mut self, node_id: NodeId, span: Span) {
         if let Some(LifetimeRes::ElidedAnchor { start, end }) =
-            self.resolver.get_lifetime_res(node_id)
+            self.resolver.lifetimes_res_map.get(&node_id).copied()
         {
             for i in start..end {
                 let lifetime = Lifetime { id: i, ident: Ident::new(kw::UnderscoreLifetime, span) };
