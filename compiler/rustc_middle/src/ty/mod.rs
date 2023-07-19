@@ -227,8 +227,6 @@ pub struct ResolverSync<'a> {
 
     pub new_node_id: NodeId,
 
-    pub node_id_to_def_id: Lock<FxHashMap<ast::NodeId, LocalDefId>>,
-
     pub extra_lifetime_params_map: Lock<NodeMap<Vec<(Ident, ast::NodeId, LifetimeRes)>>>,
 
     pub next_node_id: AtomicU32,
@@ -244,7 +242,6 @@ impl<'a> ResolverSync<'a> {
         ResolverSync {
             r,
             extra_lifetime_params_map,
-            node_id_to_def_id: Default::default(),
             new_node_id: r.next_node_id,
             next_node_id: AtomicU32::new(r.next_node_id.as_u32()),
             trait_map_set,

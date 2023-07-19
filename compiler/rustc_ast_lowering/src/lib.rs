@@ -99,6 +99,8 @@ struct LoweringContext<'a, 'hir> {
     tcx: TyCtxt<'hir>,
     resolver: &'a ResolverSync<'a>,
 
+    node_id_to_def_id: &'a mut FxHashMap<ast::NodeId, LocalDefId>,
+
     /// Used to allocate HIR nodes.
     arena: &'hir hir::Arena<'hir>,
     /// Bodies inside the owner being lowered.
@@ -441,7 +443,7 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
     let resolver = ResolverSync::new(&mut resolver);
 
     if let AstOwner::Crate(c) = ast_index[CRATE_DEF_ID] {
-        item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, owners: &owners }
+        item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, node_id_to_def_id: Default::default(), owners: &owners }
             .lower_crate(c);
     } else {
         unreachable!()
@@ -450,7 +452,7 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
     rustc_data_structures::sync::par_for_each_in(0..ast_index.len(), |def_id| {
         let def_id = LocalDefId::new(def_id);
         if let AstOwner::Item(item) = ast_index[def_id] {
-            item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, owners: &owners }
+            item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, node_id_to_def_id: Default::default(), owners: &owners }
                 .lower_item(item);
         }
     });
@@ -458,13 +460,13 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
     rustc_data_structures::sync::par_for_each_in(0..ast_index.len(), |def_id| {
         let def_id = LocalDefId::new(def_id);
         if let AstOwner::AssocItem(item, ctxt) = ast_index[def_id] {
-            item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, owners: &owners }
+            item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, node_id_to_def_id: Default::default(), owners: &owners }
                 .lower_assoc_item(item, ctxt);
         }
     });
 
     for def_id in ast_index.indices() {
-        item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, owners: &owners }
+        item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, node_id_to_def_id: Default::default(), owners: &owners }
             .lower_node(def_id);
     }
 
@@ -520,7 +522,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         let def_id = self.tcx.at(span).create_def(parent, data).def_id();
 
         debug!("create_def: def_id_to_node_id[{:?}] <-> {:?}", def_id, node_id);
-        self.resolver.node_id_to_def_id.lock().insert(node_id, def_id);
+        self.node_id_to_def_id.insert(node_id, def_id);
 
         def_id
     }
@@ -539,7 +541,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             .node_id_to_def_id
             .get(&node)
             .map(|local_def_id| *local_def_id)
-            .or_else(|| self.resolver.node_id_to_def_id.lock().get(&node).map(|id| *id))
+            .or_else(|| self.node_id_to_def_id.get(&node).map(|id| *id))
     }
 
     fn orig_local_def_id(&self, node: NodeId) -> LocalDefId {

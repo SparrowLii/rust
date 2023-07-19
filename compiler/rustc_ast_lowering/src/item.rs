@@ -23,11 +23,14 @@ use rustc_span::{Span, Symbol};
 use rustc_target::spec::abi;
 use smallvec::{smallvec, SmallVec};
 use thin_vec::ThinVec;
+use rustc_data_structures::fx::FxHashMap;
 
 pub(super) struct ItemLowerer<'a, 'hir> {
     pub(super) tcx: TyCtxt<'hir>,
     pub(super) resolver: &'a ResolverSync<'a>,
     pub(super) ast_index: &'a IndexSlice<LocalDefId, AstOwner<'a>>,
+
+    pub(crate) node_id_to_def_id: FxHashMap<ast::NodeId, LocalDefId>,
 
     pub(super) owners: &'a Lock<IndexVec<LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>>>,
 }
@@ -62,6 +65,8 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
             // Pseudo-globals.
             tcx: self.tcx,
             resolver: self.resolver,
+
+            node_id_to_def_id: &mut self.node_id_to_def_id,
             arena: self.tcx.hir_arena,
             // HirId handling.
             bodies: Vec::new(),
