@@ -443,8 +443,14 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
     let resolver = ResolverSync::new(&mut resolver);
 
     if let AstOwner::Crate(c) = ast_index[CRATE_DEF_ID] {
-        item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, node_id_to_def_id: Default::default(), owners: &owners }
-            .lower_crate(c);
+        item::ItemLowerer {
+            tcx,
+            resolver: &resolver,
+            ast_index: &ast_index,
+            node_id_to_def_id: Default::default(),
+            owners: &owners,
+        }
+        .lower_crate(c);
     } else {
         unreachable!()
     }
@@ -452,22 +458,40 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
     rustc_data_structures::sync::par_for_each_in(0..ast_index.len(), |def_id| {
         let def_id = LocalDefId::new(def_id);
         if let AstOwner::Item(item) = ast_index[def_id] {
-            item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, node_id_to_def_id: Default::default(), owners: &owners }
-                .lower_item(item);
+            item::ItemLowerer {
+                tcx,
+                resolver: &resolver,
+                ast_index: &ast_index,
+                node_id_to_def_id: Default::default(),
+                owners: &owners,
+            }
+            .lower_item(item);
         }
     });
 
     rustc_data_structures::sync::par_for_each_in(0..ast_index.len(), |def_id| {
         let def_id = LocalDefId::new(def_id);
         if let AstOwner::AssocItem(item, ctxt) = ast_index[def_id] {
-            item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, node_id_to_def_id: Default::default(), owners: &owners }
-                .lower_assoc_item(item, ctxt);
+            item::ItemLowerer {
+                tcx,
+                resolver: &resolver,
+                ast_index: &ast_index,
+                node_id_to_def_id: Default::default(),
+                owners: &owners,
+            }
+            .lower_assoc_item(item, ctxt);
         }
     });
 
     for def_id in ast_index.indices() {
-        item::ItemLowerer { tcx, resolver: &resolver, ast_index: &ast_index, node_id_to_def_id: Default::default(), owners: &owners }
-            .lower_node(def_id);
+        item::ItemLowerer {
+            tcx,
+            resolver: &resolver,
+            ast_index: &ast_index,
+            node_id_to_def_id: Default::default(),
+            owners: &owners,
+        }
+        .lower_node(def_id);
     }
 
     let owners = owners.into_inner();
@@ -736,9 +760,8 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     self.children.push((def_id, hir::MaybeOwner::NonOwner(hir_id)));
                 }
 
-                if self.resolver.trait_map_set.contains(&ast_node_id) &&
-                    let Some(traits) = self.resolver.trait_map.lock().remove(&ast_node_id) {
-                    self.trait_map.insert(hir_id.local_id, traits.into_boxed_slice());
+                if let Some(traits) = self.resolver.r.trait_map.get(&ast_node_id) {
+                    self.trait_map.insert(hir_id.local_id, traits.clone().into_boxed_slice());
                 }
 
                 hir_id

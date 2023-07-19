@@ -30,7 +30,7 @@ pub(super) struct ItemLowerer<'a, 'hir> {
     pub(super) resolver: &'a ResolverSync<'a>,
     pub(super) ast_index: &'a IndexSlice<LocalDefId, AstOwner<'a>>,
 
-    pub(crate) node_id_to_def_id: FxHashMap<ast::NodeId, LocalDefId>,
+    pub(super) node_id_to_def_id: FxHashMap<ast::NodeId, LocalDefId>,
 
     pub(super) owners: &'a Lock<IndexVec<LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>>>,
 }
