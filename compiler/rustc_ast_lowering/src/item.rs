@@ -28,6 +28,7 @@ pub(super) struct ItemLowerer<'a, 'hir> {
     pub(super) tcx: TyCtxt<'hir>,
     pub(super) resolver: &'a ResolverSync<'a>,
     pub(super) ast_index: &'a IndexSlice<LocalDefId, AstOwner<'a>>,
+
     pub(super) owners: &'a Lock<IndexVec<LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>>>,
 }
 
@@ -62,7 +63,6 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
             tcx: self.tcx,
             resolver: self.resolver,
             arena: self.tcx.hir_arena,
-
             // HirId handling.
             bodies: Vec::new(),
             attrs: SortedMap::default(),
@@ -555,17 +555,6 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 // Add all the nested `PathListItem`s to the HIR.
                 for &(ref use_tree, id) in trees {
                     let new_hir_id = self.local_def_id(id);
-
-                    let mut prefix = prefix.clone();
-
-                    // Give the segments new node-ids since they are being cloned.
-                    for seg in &mut prefix.segments {
-                        // Give the cloned segment the same resolution information
-                        // as the old one (this is needed for stability checking).
-                        let new_id = self.next_node_id();
-                        self.resolver.clone_res(seg.id, new_id);
-                        seg.id = new_id;
-                    }
 
                     // Each `use` import is an item and thus are owners of the
                     // names in the path. Up to this point the nested import is

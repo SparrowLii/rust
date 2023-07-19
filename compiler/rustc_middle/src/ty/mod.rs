@@ -226,7 +226,6 @@ pub struct ResolverSync<'a> {
     pub r: &'a ResolverAstLowering,
 
     pub new_node_id: NodeId,
-    pub partial_res_map: Lock<NodeMap<hir::def::PartialRes>>,
 
     pub node_id_to_def_id: Lock<FxHashMap<ast::NodeId, LocalDefId>>,
 
@@ -244,7 +243,6 @@ impl<'a> ResolverSync<'a> {
         let trait_map = Lock::new(std::mem::take(&mut r.trait_map));
         ResolverSync {
             r,
-            partial_res_map: Default::default(),
             extra_lifetime_params_map,
             node_id_to_def_id: Default::default(),
             new_node_id: r.next_node_id,

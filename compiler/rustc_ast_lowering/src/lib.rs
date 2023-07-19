@@ -101,7 +101,6 @@ struct LoweringContext<'a, 'hir> {
 
     /// Used to allocate HIR nodes.
     arena: &'hir hir::Arena<'hir>,
-
     /// Bodies inside the owner being lowered.
     bodies: Vec<(hir::ItemLocalId, &'hir hir::Body<'hir>)>,
     /// Attributes inside the owner being lowered.
@@ -149,10 +148,7 @@ trait ResolverAstLoweringExt {
     fn legacy_const_generic_args(&self, expr: &Expr) -> Option<Vec<usize>>;
     fn get_partial_res(&self, id: NodeId) -> Option<PartialRes>;
     fn get_import_res(&self, id: NodeId) -> PerNS<Option<Res<NodeId>>>;
-    // Clones the resolution (if any) on 'source' and applies it
-    // to 'target'. Used when desugaring a `UseTreeKind::Nested` to
-    // multiple `UseTreeKind::Simple`s
-    fn clone_res(&self, source: NodeId, target: NodeId);
+
     fn get_label_res(&self, id: NodeId) -> Option<NodeId>;
     fn get_lifetime_res(&self, id: NodeId) -> Option<LifetimeRes>;
     fn take_extra_lifetime_params(&self, id: NodeId) -> Vec<(Ident, NodeId, LifetimeRes)>;
@@ -168,15 +164,9 @@ impl ResolverAstLoweringExt for ResolverSync<'_> {
                 return None;
             }
 
-            let res = if let Some(res) = self.r.partial_res_map.get(&expr.id) {
-                *res
-            } else if expr.id >= self.new_node_id && let Some(res) = self.partial_res_map.lock().get(&expr.id) {
-                *res
-            } else {
-                return None;
-            };
-
-            if let Res::Def(DefKind::Fn, def_id) = res.full_res()? {
+            if let Res::Def(DefKind::Fn, def_id) =
+                self.r.partial_res_map.get(&expr.id)?.full_res()?
+            {
                 // We only support cross-crate argument rewriting. Uses
                 // within the same crate should be updated to use the new
                 // const generics style.
@@ -193,23 +183,9 @@ impl ResolverAstLoweringExt for ResolverSync<'_> {
         None
     }
 
-    fn clone_res(&self, source: NodeId, target: NodeId) {
-        if let Some(res) = self.r.partial_res_map.get(&source) {
-            self.partial_res_map.lock().insert(target, *res);
-        } else if source >= self.new_node_id {
-            let mut lock = self.partial_res_map.lock();
-            if let Some(res) = lock.get(&source) {
-                let res = *res;
-                lock.insert(target, res);
-            }
-        }
-    }
-
     /// Obtains resolution for a `NodeId` with a single resolution.
     fn get_partial_res(&self, id: NodeId) -> Option<PartialRes> {
-        self.r.partial_res_map.get(&id).copied().or_else(|| {
-            (id >= self.new_node_id).then(|| self.partial_res_map.lock().get(&id).copied())?
-        })
+        self.r.partial_res_map.get(&id).copied()
     }
 
     /// Obtains per-namespace resolutions for `use` statement with the given `NodeId`.
