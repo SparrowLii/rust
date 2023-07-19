@@ -8,7 +8,6 @@ use rustc_ast::ptr::P;
 use rustc_ast::visit::AssocCtxt;
 use rustc_ast::*;
 use rustc_data_structures::sorted_map::SortedMap;
-use rustc_data_structures::sync::Lock;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
@@ -30,9 +29,11 @@ pub(super) struct ItemLowerer<'a, 'hir> {
     pub(super) resolver: &'a ResolverSync<'a>,
     pub(super) ast_index: &'a IndexSlice<LocalDefId, AstOwner<'a>>,
 
+    pub(super) children: Vec<Vec<(LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>)>>,
+
     pub(super) node_id_to_def_id: FxHashMap<ast::NodeId, LocalDefId>,
 
-    pub(super) owners: &'a Lock<IndexVec<LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>>>,
+    pub(super) owners: &'a IndexVec<LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>>,
 }
 
 /// When we have a ty alias we *may* have two where clauses. To give the best diagnostics, we set the span
@@ -94,23 +95,29 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
         };
         lctx.with_hir_id_owner(owner, |lctx| f(lctx));
 
-        let mut owners = self.owners.lock();
-        for (def_id, info) in lctx.children {
-            let owner = owners.ensure_contains_elem(def_id, || hir::MaybeOwner::Phantom);
-            debug_assert!(matches!(owner, hir::MaybeOwner::Phantom));
-            *owner = info;
+        self.children.push(lctx.children);
+    }
+
+    pub(super) fn get_node(
+        &mut self,
+        def_id: LocalDefId,
+    ) -> hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>> {
+        let owner = self.owners[def_id];
+
+        if let hir::MaybeOwner::Phantom = owner {
+            unreachable!()
         }
+
+        owner
     }
 
     pub(super) fn lower_node(
         &mut self,
         def_id: LocalDefId,
-    ) -> hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>> {
-        let mut lock = Some(self.owners.lock());
-        let owner =
-            lock.as_mut().unwrap().ensure_contains_elem(def_id, || hir::MaybeOwner::Phantom);
+    ) {
+        let owner = self.owners[def_id];
+
         if let hir::MaybeOwner::Phantom = owner {
-            lock = None;
             let node = self.ast_index[def_id];
             match node {
                 AstOwner::NonOwner => {}
@@ -120,8 +127,6 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
                 AstOwner::ForeignItem(item) => self.lower_foreign_item(item),
             }
         }
-
-        lock.map(|lock| lock[def_id]).unwrap_or_else(|| self.owners.lock()[def_id])
     }
 
     #[instrument(level = "debug", skip(self, c))]
@@ -143,7 +148,7 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
         let def_id = self.resolver.r.node_id_to_def_id[&item.id];
 
         let parent_id = self.tcx.local_parent(def_id);
-        let parent_hir = self.lower_node(parent_id).unwrap();
+        let parent_hir = self.get_node(parent_id).unwrap();
         self.with_lctx(item.id, |lctx| {
             // Evaluate with the lifetimes in `params` in-scope.
             // This is used to track which lifetimes have already been defined,

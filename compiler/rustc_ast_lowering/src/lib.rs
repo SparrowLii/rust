@@ -51,7 +51,7 @@ use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sorted_map::SortedMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_data_structures::sync::{Lock, Lrc};
+use rustc_data_structures::sync::Lrc;
 use rustc_errors::{
     DiagnosticArgFromDisplay, DiagnosticMessage, Handler, StashKey, SubdiagnosticMessage,
 };
@@ -425,6 +425,17 @@ fn compute_hir_hash(
     })
 }
 
+fn update_owners<'hir>(
+    owners: &mut IndexVec<LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>>,
+    children: Vec<Vec<Vec<(LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>)>>>,
+) {
+    for (def_id, info) in children.into_iter().flatten().flatten() {
+        let owner = owners.ensure_contains_elem(def_id, || hir::MaybeOwner::Phantom);
+        debug_assert!(matches!(owner, hir::MaybeOwner::Phantom));
+        *owner = info;
+    }
+}
+
 pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
     let sess = tcx.sess;
     // Queries that borrow `resolver_for_lowering`.
@@ -435,66 +446,80 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
 
     let ast_index = index_crate(&resolver.node_id_to_def_id, &krate);
 
-    let owners = Lock::new(IndexVec::from_fn_n(
+    let mut owners = IndexVec::from_fn_n(
         |_| hir::MaybeOwner::Phantom,
         tcx.definitions_untracked().def_index_count(),
-    ));
+    );
 
     let resolver = ResolverSync::new(&mut resolver);
 
     if let AstOwner::Crate(c) = ast_index[CRATE_DEF_ID] {
-        item::ItemLowerer {
+        let mut i = item::ItemLowerer {
             tcx,
             resolver: &resolver,
+            children: Vec::new(),
             ast_index: &ast_index,
             node_id_to_def_id: Default::default(),
             owners: &owners,
-        }
-        .lower_crate(c);
+        };
+        i.lower_crate(c);
+        let children = i.children;
+        update_owners(&mut owners, vec![children]);
     } else {
         unreachable!()
     }
 
-    rustc_data_structures::sync::par_for_each_in(0..ast_index.len(), |def_id| {
+    let children: Vec<_> = rustc_data_structures::sync::par_map(0..ast_index.len(), |def_id| {
         let def_id = LocalDefId::new(def_id);
         if let AstOwner::Item(item) = ast_index[def_id] {
-            item::ItemLowerer {
+            let mut i = item::ItemLowerer {
                 tcx,
                 resolver: &resolver,
+                children: Vec::new(),
                 ast_index: &ast_index,
                 node_id_to_def_id: Default::default(),
                 owners: &owners,
-            }
-            .lower_item(item);
+            };
+            i.lower_item(item);
+            i.children
+        } else {
+            Vec::new()
         }
     });
+    update_owners(&mut owners, children);
 
-    rustc_data_structures::sync::par_for_each_in(0..ast_index.len(), |def_id| {
+    let children: Vec<_> = rustc_data_structures::sync::par_map(0..ast_index.len(), |def_id| {
         let def_id = LocalDefId::new(def_id);
         if let AstOwner::AssocItem(item, ctxt) = ast_index[def_id] {
-            item::ItemLowerer {
+            let mut i = item::ItemLowerer {
                 tcx,
                 resolver: &resolver,
+                children: Vec::new(),
                 ast_index: &ast_index,
                 node_id_to_def_id: Default::default(),
                 owners: &owners,
-            }
-            .lower_assoc_item(item, ctxt);
+            };
+            i.lower_assoc_item(item, ctxt);
+            i.children
+        } else {
+            Vec::new()
         }
     });
+    update_owners(&mut owners, children);
 
     for def_id in ast_index.indices() {
-        item::ItemLowerer {
+        let mut i = item::ItemLowerer {
             tcx,
             resolver: &resolver,
+            children: Vec::new(),
             ast_index: &ast_index,
             node_id_to_def_id: Default::default(),
             owners: &owners,
-        }
-        .lower_node(def_id);
+        };
+        i.lower_node(def_id);
+        let children = i.children;
+        update_owners(&mut owners, vec![children]);
     }
-
-    let owners = owners.into_inner();
 
     // Drop AST to free memory
     drop(ast_index);

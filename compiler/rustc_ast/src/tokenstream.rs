@@ -119,7 +119,7 @@ where
     }
 }
 
-pub trait ToAttrTokenStream: sync::DynSend + sync::DynSync {
+pub trait ToAttrTokenStream: sync::DynSend + Send + Sync + sync::DynSync {
     fn to_attr_token_stream(&self) -> AttrTokenStream;
 }
 
