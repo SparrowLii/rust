@@ -453,6 +453,17 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
 
     let resolver = ResolverSync::new(&mut resolver);
 
+    let mut items = Vec::new();
+    let mut assoc_items = Vec::new();
+
+    for def_id in ast_index.indices() {
+        if let AstOwner::Item(item) = ast_index[def_id] {
+            items.push(item);
+        } else if let AstOwner::AssocItem(item, ctxt) = ast_index[def_id] {
+            assoc_items.push((item, ctxt));
+        };
+    }
+
     if let AstOwner::Crate(c) = ast_index[CRATE_DEF_ID] {
         let mut i = item::ItemLowerer {
             tcx,
@@ -469,41 +480,31 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
         unreachable!()
     }
 
-    let children: Vec<_> = rustc_data_structures::sync::par_map(0..ast_index.len(), |def_id| {
-        let def_id = LocalDefId::new(def_id);
-        if let AstOwner::Item(item) = ast_index[def_id] {
-            let mut i = item::ItemLowerer {
-                tcx,
-                resolver: &resolver,
-                children: Vec::new(),
-                ast_index: &ast_index,
-                node_id_to_def_id: Default::default(),
-                owners: &owners,
-            };
-            i.lower_item(item);
-            i.children
-        } else {
-            Vec::new()
-        }
+    let children: Vec<_> = rustc_data_structures::sync::par_map(items, |item| {
+        let mut i = item::ItemLowerer {
+            tcx,
+            resolver: &resolver,
+            children: Vec::new(),
+            ast_index: &ast_index,
+            node_id_to_def_id: Default::default(),
+            owners: &owners,
+        };
+        i.lower_item(item);
+        i.children
     });
     update_owners(&mut owners, children);
 
-    let children: Vec<_> = rustc_data_structures::sync::par_map(0..ast_index.len(), |def_id| {
-        let def_id = LocalDefId::new(def_id);
-        if let AstOwner::AssocItem(item, ctxt) = ast_index[def_id] {
-            let mut i = item::ItemLowerer {
-                tcx,
-                resolver: &resolver,
-                children: Vec::new(),
-                ast_index: &ast_index,
-                node_id_to_def_id: Default::default(),
-                owners: &owners,
-            };
-            i.lower_assoc_item(item, ctxt);
-            i.children
-        } else {
-            Vec::new()
-        }
+    let children: Vec<_> = rustc_data_structures::sync::par_map(assoc_items, |(item, ctxt)| {
+        let mut i = item::ItemLowerer {
+            tcx,
+            resolver: &resolver,
+            children: Vec::new(),
+            ast_index: &ast_index,
+            node_id_to_def_id: Default::default(),
+            owners: &owners,
+        };
+        i.lower_assoc_item(item, ctxt);
+        i.children
     });
     update_owners(&mut owners, children);
 
