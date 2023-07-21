@@ -69,6 +69,7 @@ This API is completely unstable and subject to change.
 #![feature(slice_partition_dedup)]
 #![feature(try_blocks)]
 #![feature(type_alias_impl_trait)]
+#![feature(fs_try_exists)]
 #![recursion_limit = "256"]
 
 #[macro_use]
