@@ -236,16 +236,24 @@ pub fn check_crate(tcx: TyCtxt<'_>) -> Result<(), ErrorGuaranteed> {
         tcx.hir().for_each_module(|module| tcx.ensure().check_mod_item_types(module))
     });
 
-    // FIXME: Remove this when we implement creating `DefId`s
-    // for anon constants during their parents' typeck.
-    // Typeck all body owners in parallel will produce queries
-    // cycle errors because it may typeck on anon constants directly.
-    tcx.hir().par_body_owners(|item_def_id| {
-        let def_kind = tcx.def_kind(item_def_id);
-        if !matches!(def_kind, DefKind::AnonConst) {
-            tcx.ensure().typeck(item_def_id);
-        }
-    });
+    let incremental = if let Some(path) = &tcx.sess.opts.incremental {
+        if matches!(std::fs::try_exists(PathBuf::from(path)), Ok(false)) { false } else { true }
+    } else {
+        false
+    };
+
+    if !incremental {
+        // FIXME: Remove this when we implement creating `DefId`s
+        // for anon constants during their parents' typeck.
+        // Typeck all body owners in parallel will produce queries
+        // cycle errors because it may typeck on anon constants directly.
+        tcx.hir().par_body_owners(|item_def_id| {
+            let def_kind = tcx.def_kind(item_def_id);
+            if !matches!(def_kind, DefKind::AnonConst) {
+                tcx.ensure().typeck(item_def_id);
+            }
+        });
+    }
 
     check_unused::check_crate(tcx);
 
