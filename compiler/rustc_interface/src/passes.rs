@@ -790,8 +790,20 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
     // passes are timed inside typeck
     rustc_hir_analysis::check_crate(tcx)?;
 
+    let incremental = if let Some(path) = &tcx.sess.opts.incremental {
+        if matches!(std::fs::try_exists(PathBuf::from(path)), Ok(false)) { false } else { true }
+    } else {
+        false
+    };
+
     sess.time("MIR_borrow_checking", || {
-        tcx.hir().par_body_owners(|def_id| tcx.ensure().mir_borrowck(def_id));
+        if incremental {
+            for def_id in tcx.hir().body_owners() {
+                tcx.ensure().mir_borrowck(def_id);
+            }
+        } else {
+            tcx.hir().par_body_owners(|def_id| tcx.ensure().mir_borrowck(def_id));
+        }
     });
 
     sess.time("MIR_effect_checking", || {
