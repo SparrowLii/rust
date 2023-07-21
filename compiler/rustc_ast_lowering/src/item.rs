@@ -12,7 +12,7 @@ use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{LocalDefId, CRATE_DEF_ID};
-use rustc_hir::PredicateOrigin;
+use rustc_hir::{ItemLocalId, OwnerNode, PredicateOrigin, TraitCandidate};
 use rustc_index::{Idx, IndexSlice, IndexVec};
 use rustc_middle::ty::{ResolverSync, TyCtxt};
 use rustc_span::edit_distance::find_best_match_for_name;
@@ -29,7 +29,17 @@ pub(super) struct ItemLowerer<'a, 'hir> {
     pub(super) resolver: &'a ResolverSync<'a>,
     pub(super) ast_index: &'a IndexSlice<LocalDefId, AstOwner<'a>>,
 
-    pub(super) children: Vec<Vec<(LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>)>>,
+    pub(super) children: Vec<(LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>)>,
+
+    pub(super) post_owners: Vec<(
+        LocalDefId,
+        OwnerNode<'hir>,
+        SortedMap<hir::ItemLocalId, &'hir [Attribute]>,
+        Vec<(hir::ItemLocalId, &'hir hir::Body<'hir>)>,
+        FxHashMap<ItemLocalId, Box<[TraitCandidate]>>,
+    )>,
+
+    pub(super) fake_defs: Vec<(LocalDefId, Span, LocalDefId, DefPathData)>,
 
     pub(super) node_id_to_def_id: FxHashMap<ast::NodeId, LocalDefId>,
 
@@ -67,6 +77,8 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
             tcx: self.tcx,
             resolver: self.resolver,
 
+            fake_defs: Vec::new(),
+            post_owner: Vec::new(),
             node_id_to_def_id: &mut self.node_id_to_def_id,
             arena: self.tcx.hir_arena,
             // HirId handling.
@@ -95,7 +107,9 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
         };
         lctx.with_hir_id_owner(owner, |lctx| f(lctx));
 
-        self.children.push(lctx.children);
+        self.fake_defs.extend(lctx.fake_defs);
+        self.children.extend(lctx.children);
+        self.post_owners.extend(lctx.post_owner);
     }
 
     pub(super) fn get_node(

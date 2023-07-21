@@ -66,7 +66,7 @@ use std::ops::ControlFlow;
 use std::{fmt, str};
 use std::sync::atomic::AtomicU32;
 use rustc_ast::NodeId;
-use rustc_data_structures::sync::Lock;
+use rustc_data_structures::sync::{AtomicUsize, Lock};
 
 pub use crate::ty::diagnostics::*;
 pub use rustc_type_ir::AliasKind::*;
@@ -229,10 +229,13 @@ pub struct ResolverSync<'a> {
     pub extra_lifetime_params_map: Lock<NodeMap<Vec<(Ident, ast::NodeId, LifetimeRes)>>>,
 
     pub next_node_id: AtomicU32,
+
+    pub start_def_id: usize,
+    pub next_def_id: AtomicUsize,
 }
 
 impl<'a> ResolverSync<'a> {
-    pub fn new(r: &'a mut ResolverAstLowering) -> Self {
+    pub fn new(r: &'a mut ResolverAstLowering, def_len: usize) -> Self {
         let extra_lifetime_params_map = Lock::new(std::mem::take(&mut r.extra_lifetime_params_map));
 
         ResolverSync {
@@ -240,6 +243,9 @@ impl<'a> ResolverSync<'a> {
             extra_lifetime_params_map,
             new_node_id: r.next_node_id,
             next_node_id: AtomicU32::new(r.next_node_id.as_u32()),
+
+            start_def_id: def_len,
+            next_def_id: AtomicUsize::new(def_len),
         }
     }
 }

@@ -60,7 +60,7 @@ use rustc_hir as hir;
 use rustc_hir::def::{DefKind, LifetimeRes, Namespace, PartialRes, PerNS, Res};
 use rustc_hir::def_id::{LocalDefId, CRATE_DEF_ID, LOCAL_CRATE};
 use rustc_hir::definitions::DefPathData;
-use rustc_hir::{ConstArg, GenericArg, ItemLocalId, ParamName, TraitCandidate};
+use rustc_hir::{ConstArg, GenericArg, ItemLocalId, MaybeOwner, OwnerNode, ParamName, TraitCandidate};
 use rustc_index::{Idx, IndexSlice, IndexVec};
 use rustc_middle::{
     span_bug,
@@ -109,6 +109,16 @@ struct LoweringContext<'a, 'hir> {
     attrs: SortedMap<hir::ItemLocalId, &'hir [Attribute]>,
     /// Collect items that were created by lowering the current owner.
     children: Vec<(LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>)>,
+
+    fake_defs: Vec<(LocalDefId, Span, LocalDefId, DefPathData)>,
+
+    post_owner: Vec<(
+        LocalDefId,
+        OwnerNode<'hir>,
+        SortedMap<hir::ItemLocalId, &'hir [Attribute]>,
+        Vec<(hir::ItemLocalId, &'hir hir::Body<'hir>)>,
+        FxHashMap<ItemLocalId, Box<[TraitCandidate]>>,
+    )>,
 
     generator_kind: Option<hir::GeneratorKind>,
 
@@ -425,14 +435,82 @@ fn compute_hir_hash(
     })
 }
 
-fn update_owners<'hir>(
+fn end_lowerer<'hir>(
+    tcx: TyCtxt<'hir>,
     owners: &mut IndexVec<LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>>,
-    children: Vec<Vec<Vec<(LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>)>>>,
+    children: Vec<(
+        Vec<(LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>)>,
+        Vec<(LocalDefId, Span, LocalDefId, DefPathData)>,
+        Vec<(
+            LocalDefId,
+            OwnerNode<'hir>,
+            SortedMap<hir::ItemLocalId, &'hir [Attribute]>,
+            Vec<(hir::ItemLocalId, &'hir hir::Body<'hir>)>,
+            FxHashMap<ItemLocalId, Box<[TraitCandidate]>>,
+        )>,
+    )>,
 ) {
-    for (def_id, info) in children.into_iter().flatten().flatten() {
-        let owner = owners.ensure_contains_elem(def_id, || hir::MaybeOwner::Phantom);
+    let mut fake_defs = Vec::new();
+    let mut post_owners = Vec::new();
+    for (children, fake_def, post_owner) in children.into_iter() {
+        for (def_id, info) in children.into_iter() {
+            let owner = owners.ensure_contains_elem(def_id, || hir::MaybeOwner::Phantom);
+            debug_assert!(matches!(owner, hir::MaybeOwner::Phantom));
+            *owner = info;
+        }
+
+        fake_defs.extend(fake_def);
+        post_owners.extend(post_owner);
+    }
+
+    fake_defs.sort_by_key(|k| k.0.index());
+
+    for (fake_def_id, span, parent, data) in fake_defs {
+        let def_id = tcx.at(span).create_def(parent, data).def_id();
+        assert_eq!(fake_def_id, def_id);
+    }
+
+    for (owner, node, attrs, mut bodies, trait_map) in post_owners.into_iter() {
+        let info = {
+            #[cfg(debug_assertions)]
+            for (id, attrs) in attrs.iter() {
+                // Verify that we do not store empty slices in the map.
+                if attrs.is_empty() {
+                    panic!("Stored empty attributes for {:?}", id);
+                }
+            }
+
+            bodies.sort_by_key(|(k, _)| *k);
+            let bodies = SortedMap::from_presorted_elements(bodies);
+
+            // Don't hash unless necessary, because it's expensive.
+            let (opt_hash_including_bodies, attrs_hash) = if tcx.sess.needs_crate_hash() {
+                tcx.with_stable_hashing_context(|mut hcx| {
+                    let mut stable_hasher = StableHasher::new();
+                    hcx.with_hir_bodies(node.def_id(), &bodies, |hcx| {
+                        node.hash_stable(hcx, &mut stable_hasher)
+                    });
+                    let h1 = stable_hasher.finish();
+
+                    let mut stable_hasher = StableHasher::new();
+                    attrs.hash_stable(&mut hcx, &mut stable_hasher);
+                    let h2 = stable_hasher.finish();
+
+                    (Some(h1), Some(h2))
+                })
+            } else {
+                (None, None)
+            };
+            let (nodes, parenting) =
+                index::index_hir(tcx.sess, &*tcx.definitions_untracked(), node, &bodies);
+            let nodes = hir::OwnerNodes { opt_hash_including_bodies, nodes, bodies };
+            let attrs = hir::AttributeMap { map: attrs, opt_hash: attrs_hash };
+
+            tcx.hir_arena.alloc(hir::OwnerInfo { nodes, parenting, attrs, trait_map })
+        };
+        let owner = owners.ensure_contains_elem(owner, || hir::MaybeOwner::Phantom);
         debug_assert!(matches!(owner, hir::MaybeOwner::Phantom));
-        *owner = info;
+        *owner = MaybeOwner::Owner(info);
     }
 }
 
@@ -451,7 +529,7 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
         tcx.definitions_untracked().def_index_count(),
     );
 
-    let resolver = ResolverSync::new(&mut resolver);
+    let resolver = ResolverSync::new(&mut resolver, tcx.definitions_untracked().def_index_count());
 
     let mut items = Vec::new();
     let mut assoc_items = Vec::new();
@@ -472,10 +550,14 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
             ast_index: &ast_index,
             node_id_to_def_id: Default::default(),
             owners: &owners,
+            fake_defs: Vec::new(),
+            post_owners: Vec::new(),
         };
         i.lower_crate(c);
         let children = i.children;
-        update_owners(&mut owners, vec![children]);
+        let fake_defs = i.fake_defs;
+        let post_owners = i.post_owners;
+        end_lowerer(tcx, &mut owners, vec![(children, fake_defs, post_owners)]);
     } else {
         unreachable!()
     }
@@ -488,11 +570,13 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
             ast_index: &ast_index,
             node_id_to_def_id: Default::default(),
             owners: &owners,
+            fake_defs: Vec::new(),
+            post_owners: Vec::new(),
         };
         i.lower_item(item);
-        i.children
+        (i.children, i.fake_defs, i.post_owners)
     });
-    update_owners(&mut owners, children);
+    end_lowerer(tcx, &mut owners, children);
 
     let children: Vec<_> = rustc_data_structures::sync::par_map(assoc_items, |(item, ctxt)| {
         let mut i = item::ItemLowerer {
@@ -502,11 +586,13 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
             ast_index: &ast_index,
             node_id_to_def_id: Default::default(),
             owners: &owners,
+            fake_defs: Vec::new(),
+            post_owners: Vec::new(),
         };
         i.lower_assoc_item(item, ctxt);
-        i.children
+        (i.children, i.fake_defs, i.post_owners)
     });
-    update_owners(&mut owners, children);
+    end_lowerer(tcx, &mut owners, children);
 
     for def_id in ast_index.indices() {
         let mut i = item::ItemLowerer {
@@ -516,10 +602,14 @@ pub fn lower_to_hir(tcx: TyCtxt<'_>, (): ()) -> hir::Crate<'_> {
             ast_index: &ast_index,
             node_id_to_def_id: Default::default(),
             owners: &owners,
+            fake_defs: Vec::new(),
+            post_owners: Vec::new(),
         };
         i.lower_node(def_id);
         let children = i.children;
-        update_owners(&mut owners, vec![children]);
+        let fake_defs = i.fake_defs;
+        let post_owners = i.post_owners;
+        end_lowerer(tcx, &mut owners, vec![(children, fake_defs, post_owners)]);
     }
 
     // Drop AST to free memory
@@ -569,11 +659,18 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             self.tcx.hir().def_key(self.local_def_id(node_id)),
         );
 
-        let def_id = self.tcx.at(span).create_def(parent, data).def_id();
+        let def_id = self.creat_def_fake(span, parent, data);
 
         debug!("create_def: def_id_to_node_id[{:?}] <-> {:?}", def_id, node_id);
         self.node_id_to_def_id.insert(node_id, def_id);
 
+        def_id
+    }
+
+    fn creat_def_fake(&mut self, span: Span, parent: LocalDefId, data: DefPathData) -> LocalDefId {
+        let def_id = self.resolver.next_def_id.fetch_add(1, Ordering::Relaxed);
+        let def_id = LocalDefId::new(def_id);
+        self.fake_defs.push((def_id, span, parent, data));
         def_id
     }
 
@@ -680,7 +777,16 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         // `f` should have consumed all the elements in these vectors when constructing `item`.
         debug_assert!(self.impl_trait_defs.is_empty());
         debug_assert!(self.impl_trait_bounds.is_empty());
-        let info = self.make_owner_info(item);
+
+        debug_assert!(!self.children.iter().any(|(id, _)| id == &def_id));
+
+        /*let info = self.make_owner_info(item);
+        self.children.push((def_id, hir::MaybeOwner::Owner(info)));*/
+
+        let attrs = std::mem::take(&mut self.attrs);
+        let bodies = std::mem::take(&mut self.bodies);
+        let trait_map = std::mem::take(&mut self.trait_map);
+        self.post_owner.push((def_id, item, attrs, bodies, trait_map));
 
         self.attrs = current_attrs;
         self.bodies = current_bodies;
@@ -690,9 +796,6 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         self.item_local_id_counter = current_local_counter;
         self.impl_trait_defs = current_impl_trait_defs;
         self.impl_trait_bounds = current_impl_trait_bounds;
-
-        debug_assert!(!self.children.iter().any(|(id, _)| id == &def_id));
-        self.children.push((def_id, hir::MaybeOwner::Owner(info)));
     }
 
     /// Installs the remapping `remap` in scope while `f` is being executed.
@@ -716,7 +819,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         res
     }
 
-    fn make_owner_info(&mut self, node: hir::OwnerNode<'hir>) -> &'hir hir::OwnerInfo<'hir> {
+    /*fn make_owner_info(&mut self, node: hir::OwnerNode<'hir>) -> &'hir hir::OwnerInfo<'hir> {
         let attrs = std::mem::take(&mut self.attrs);
         let mut bodies = std::mem::take(&mut self.bodies);
         let trait_map = std::mem::take(&mut self.trait_map);
@@ -756,7 +859,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         let attrs = hir::AttributeMap { map: attrs, opt_hash: attrs_hash };
 
         self.arena.alloc(hir::OwnerInfo { nodes, parenting, attrs, trait_map })
-    }
+    }*/
 
     /// This method allocates a new `HirId` for the given `NodeId` and stores it in
     /// the `LoweringContext`'s `NodeId => HirId` map.
