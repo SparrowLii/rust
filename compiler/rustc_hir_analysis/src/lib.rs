@@ -237,7 +237,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) -> Result<(), ErrorGuaranteed> {
     });
 
     let incremental = if let Some(path) = &tcx.sess.opts.incremental {
-        if matches!(std::fs::try_exists(PathBuf::from(path)), Ok(false)) { false } else { true }
+        if matches!(std::fs::try_exists(std::path::PathBuf::from(path)), Ok(false)) { false } else { true }
     } else {
         false
     };
