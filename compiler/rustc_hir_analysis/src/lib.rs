@@ -69,7 +69,6 @@ This API is completely unstable and subject to change.
 #![feature(slice_partition_dedup)]
 #![feature(try_blocks)]
 #![feature(type_alias_impl_trait)]
-#![feature(fs_try_exists)]
 #![recursion_limit = "256"]
 
 #[macro_use]
@@ -237,13 +236,9 @@ pub fn check_crate(tcx: TyCtxt<'_>) -> Result<(), ErrorGuaranteed> {
         tcx.hir().for_each_module(|module| tcx.ensure().check_mod_item_types(module))
     });
 
-    let incremental = if let Some(path) = &tcx.sess.opts.incremental {
-        if matches!(std::fs::try_exists(std::path::PathBuf::from(path)), Ok(false)) { false } else { true }
-    } else {
-        false
-    };
+    let has_cache = tcx.query_system.on_disk_cache.as_ref().map(|cache| cache.has_cache()).unwrap_or(false);
 
-    if !incremental {
+    if !has_cache {
         // FIXME: Remove this when we implement creating `DefId`s
         // for anon constants during their parents' typeck.
         // Typeck all body owners in parallel will produce queries

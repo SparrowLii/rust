@@ -214,6 +214,10 @@ impl<'sess> OnDiskCache<'sess> {
         }
     }
 
+    pub fn has_cache(&self) -> bool {
+        self.serialized_data.read().is_none()
+    }
+
     /// Execute all cache promotions and release the serialized backing Mmap.
     ///
     /// Cache promotions require invoking queries, which needs to read the serialized data.

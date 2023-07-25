@@ -790,14 +790,10 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
     // passes are timed inside typeck
     rustc_hir_analysis::check_crate(tcx)?;
 
-    let incremental = if let Some(path) = &tcx.sess.opts.incremental {
-        if matches!(std::fs::try_exists(PathBuf::from(path)), Ok(false)) { false } else { true }
-    } else {
-        false
-    };
+    let has_cache = tcx.query_system.on_disk_cache.as_ref().map(|cache| cache.has_cache()).unwrap_or(false);
 
     sess.time("MIR_borrow_checking", || {
-        if incremental {
+        if has_cache {
             for def_id in tcx.hir().body_owners() {
                 tcx.ensure().mir_borrowck(def_id);
             }
