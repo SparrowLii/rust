@@ -2451,12 +2451,12 @@ pub fn build_session_options(early_dcx: &mut EarlyDiagCtxt, matches: &getopts::M
         cg.codegen_units,
     );
 
-    if unstable_opts.threads == 0 {
+    if cg.threads == 0 {
         early_dcx.early_fatal("value for threads must be a positive non-zero integer");
     }
 
     let fuel = unstable_opts.fuel.is_some() || unstable_opts.print_fuel.is_some();
-    if fuel && unstable_opts.threads > 1 {
+    if fuel && cg.threads > 1 {
         early_dcx.early_fatal("optimization fuel is incompatible with multiple threads");
     }
     if fuel && cg.incremental.is_some() {

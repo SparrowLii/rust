@@ -975,7 +975,7 @@ class RustBuild(object):
 
         # If any of RUSTFLAGS or RUSTFLAGS_BOOTSTRAP are present and nonempty,
         # we allow arbitrary compiler flags in there, including unstable ones
-        # such as `-Zthreads=8`.
+        # such as `-Cthreads=8`.
         #
         # But if there aren't custom flags being passed to bootstrap, then we
         # cancel the RUSTC_BOOTSTRAP=1 from above by passing `-Zallow-features=`

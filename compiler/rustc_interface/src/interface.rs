@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::result;
 use std::sync::Arc;
 
-use rustc_ast::{token, LitKind, MetaItemKind};
+use rustc_ast::{LitKind, MetaItemKind, token};
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::stable_hasher::StableHasher;
@@ -21,10 +21,10 @@ use rustc_query_system::query::print_query_stack;
 use rustc_session::config::{self, Cfg, CheckCfg, ExpectedValues, Input, OutFileName};
 use rustc_session::filesearch::{self, sysroot_candidates};
 use rustc_session::parse::ParseSess;
-use rustc_session::{lint, CompilerIO, EarlyDiagCtxt, Session};
+use rustc_session::{CompilerIO, EarlyDiagCtxt, Session, lint};
+use rustc_span::FileName;
 use rustc_span::source_map::{FileLoader, RealFileLoader, SourceMapInputs};
 use rustc_span::symbol::sym;
-use rustc_span::FileName;
 use tracing::trace;
 
 use crate::util;
@@ -374,7 +374,7 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
     trace!("run_compiler");
 
     // Set parallel mode before thread pool creation, which will create `Lock`s.
-    rustc_data_structures::sync::set_dyn_thread_safe_mode(config.opts.unstable_opts.threads > 1);
+    rustc_data_structures::sync::set_dyn_thread_safe_mode(config.opts.cg.threads > 1);
 
     // Check jobserver before run_in_thread_pool_with_globals, which call jobserver::acquire_thread
     let early_dcx = EarlyDiagCtxt::new(config.opts.error_format);
@@ -391,7 +391,7 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
     util::run_in_thread_pool_with_globals(
         &early_dcx,
         config.opts.edition,
-        config.opts.unstable_opts.threads,
+        config.opts.cg.threads,
         SourceMapInputs { file_loader, path_mapping, hash_kind },
         |current_gcx| {
             // The previous `early_dcx` can't be reused here because it doesn't

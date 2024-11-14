@@ -1,4 +1,4 @@
-//@ compile-flags:-C extra-filename=-1 -Z threads=16
+//@ compile-flags:-C extra-filename=-1 -C threads=16
 //@ no-prefer-dynamic
 //@ build-pass
 #![crate_name = "crateresolve1"]
