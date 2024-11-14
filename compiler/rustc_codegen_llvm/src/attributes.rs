@@ -413,9 +413,7 @@ pub(crate) fn llfn_attrs_from_instance<'ll, 'tcx>(
         }
     } else if llvm_util::get_version() >= (19, 0, 0) {
         // For non-naked functions, set branch protection attributes on aarch64.
-        if let Some(BranchProtection { bti, pac_ret }) =
-            cx.sess().opts.unstable_opts.branch_protection
-        {
+        if let Some(BranchProtection { bti, pac_ret }) = cx.sess().opts.cg.branch_protection {
             assert!(cx.sess().target.arch == "aarch64");
             if bti {
                 to_add.push(llvm::CreateAttrString(cx.llcx, "branch-target-enforcement"));

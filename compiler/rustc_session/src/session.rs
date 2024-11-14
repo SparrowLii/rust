@@ -1278,7 +1278,7 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
         }
     }
 
-    if sess.opts.unstable_opts.branch_protection.is_some() && sess.target.arch != "aarch64" {
+    if sess.opts.cg.branch_protection.is_some() && sess.target.arch != "aarch64" {
         sess.dcx().emit_err(errors::BranchProtectionRequiresAArch64);
     }
 
