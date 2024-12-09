@@ -1685,7 +1685,7 @@ impl Config {
 
             config.llvm_tools_enabled = llvm_tools.unwrap_or(true);
             config.rustc_parallel =
-                parallel_compiler.unwrap_or(config.channel == "dev" || config.channel == "nightly");
+                parallel_compiler.unwrap_or(true);
             config.rustc_default_linker = default_linker;
             config.musl_root = musl_root.map(PathBuf::from);
             config.save_toolstates = save_toolstates.map(PathBuf::from);

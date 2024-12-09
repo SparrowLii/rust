@@ -560,7 +560,7 @@
 #incremental = false
 
 # Build a multi-threaded rustc. This allows users to use parallel rustc
-# via the unstable option `-Z threads=n`.
+# via the codegen option `-C threads=n`.
 # Since stable/beta channels only allow using stable features,
 # `parallel-compiler = false` should be set for these channels.
 #parallel-compiler = true

@@ -1,4 +1,4 @@
-//@ compile-flags: -Z threads=8
+//@ compile-flags: -C threads=8
 //@ run-pass
 
 fn main() {
