@@ -1,5 +1,5 @@
 session_binary_float_literal_not_supported = binary float literal is not supported
-session_branch_protection_requires_aarch64 = `-Zbranch-protection` is only supported on aarch64
+session_branch_protection_requires_aarch64 = `-Cbranch-protection` is only supported on aarch64
 
 session_cannot_enable_crt_static_linux = sanitizer is incompatible with statically linked libc, disable it using `-C target-feature=-crt-static`
 

@@ -277,7 +277,7 @@ pub unsafe fn create_module<'ll>(
         }
     }
 
-    if let Some(BranchProtection { bti, pac_ret }) = sess.opts.unstable_opts.branch_protection {
+    if let Some(BranchProtection { bti, pac_ret }) = sess.opts.cg.branch_protection {
         if sess.target.arch == "aarch64" {
             unsafe {
                 llvm::LLVMRustAddModuleFlagU32(

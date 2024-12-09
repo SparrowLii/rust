@@ -1495,6 +1495,8 @@ options! {
     // tidy-alphabetical-start
     ar: String = (String::new(), parse_string, [UNTRACKED],
         "this option is deprecated and does nothing"),
+    branch_protection: Option<BranchProtection> = (None, parse_branch_protection, [TRACKED],
+    "set options for branch target identification and pointer authentication on AArch64"),
     #[rustc_lint_opt_deny_field_access("use `Session::code_model` instead of this field")]
     code_model: Option<CodeModel> = (None, parse_code_model, [TRACKED],
         "choose the code model to use (`rustc --print code-models` for details)"),
@@ -1611,6 +1613,15 @@ options! {
     target_feature: String = (String::new(), parse_target_feature, [TRACKED],
         "target specific attributes. (`rustc --print target-features` for details). \
         This feature is unsafe."),
+
+    /// We default to 1 here since we want to behave like
+    /// a sequential compiler for now. This'll likely be adjusted
+    /// in the future. Note that -Cthreads=0 is the way to get
+    /// the num_cpus behavior.
+    #[rustc_lint_opt_deny_field_access("use `Session::threads` instead of this field")]
+    threads: usize = (1, parse_threads, [UNTRACKED],
+    "use a thread pool with N threads"),
+
     // tidy-alphabetical-end
 
     // If you add a new option, please update:
@@ -1641,8 +1652,6 @@ options! {
         (default: no)"),
     box_noalias: bool = (true, parse_bool, [TRACKED],
         "emit noalias metadata for box (default: yes)"),
-    branch_protection: Option<BranchProtection> = (None, parse_branch_protection, [TRACKED],
-        "set options for branch target identification and pointer authentication on AArch64"),
     cf_protection: CFProtection = (CFProtection::None, parse_cfprotection, [TRACKED],
         "instrument control-flow architecture protection"),
     check_cfg_all_expected: bool = (false, parse_bool, [UNTRACKED],
@@ -2032,13 +2041,6 @@ written to standard error output)"),
     #[rustc_lint_opt_deny_field_access("use `Session::lto` instead of this field")]
     thinlto: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "enable ThinLTO when possible"),
-    /// We default to 1 here since we want to behave like
-    /// a sequential compiler for now. This'll likely be adjusted
-    /// in the future. Note that -Zthreads=0 is the way to get
-    /// the num_cpus behavior.
-    #[rustc_lint_opt_deny_field_access("use `Session::threads` instead of this field")]
-    threads: usize = (1, parse_threads, [UNTRACKED],
-        "use a thread pool with N threads"),
     time_llvm_passes: bool = (false, parse_bool, [UNTRACKED],
         "measure time of each LLVM pass (default: no)"),
     time_passes: bool = (false, parse_bool, [UNTRACKED],
