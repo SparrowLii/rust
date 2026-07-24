@@ -623,6 +623,10 @@ fn write_mir_intro<'tcx>(
     // Add an empty line before the first block is printed.
     writeln!(w)?;
 
+    if let Some(loop_preload_candidate) = body.loop_preload_candidate {
+        writeln!(w, "{INDENT}loop_preload_candidate = {loop_preload_candidate:?};")?;
+        writeln!(w)?;
+    }
     if let Some(coverage_info_hi) = &body.coverage_info_hi {
         write_coverage_info_hi(coverage_info_hi, w)?;
     }

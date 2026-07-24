@@ -1,0 +1,19 @@
+// MIR for `decode_baseline_no_loop` after LoopPreloadMarker
+
+fn decode_baseline_no_loop(_1: &[u8]) -> u64 {
+    debug input => _1;
+    let mut _0: u64;
+    let mut _2: usize;
+    let mut _3: &[u8];
+
+    bb0: {
+        StorageLive(_2);
+        StorageLive(_3);
+        _3 = copy _1;
+        _2 = PtrMetadata(move _3);
+        StorageDead(_3);
+        _0 = move _2 as u64 (IntToInt);
+        StorageDead(_2);
+        return;
+    }
+}

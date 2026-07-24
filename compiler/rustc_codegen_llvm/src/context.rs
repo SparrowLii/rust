@@ -14,6 +14,7 @@ use rustc_data_structures::base_n::{ALPHANUMERIC_ONLY, ToBaseN};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::small_c_str::SmallCStr;
 use rustc_hir::def_id::DefId;
+use rustc_middle::mir::LoopPreloadCandidate;
 use rustc_middle::mono::CodegenUnit;
 use rustc_middle::ty::layout::{
     FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTypingEnv, LayoutError, LayoutOfHelpers,
@@ -1015,6 +1016,18 @@ impl<'ll, 'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
         attrs.push(attributes::target_cpu_attr(self, self.sess()));
         attrs.extend(attributes::tune_cpu_attr(self, self.sess()));
         attributes::apply_to_llfn(llfn, llvm::AttributePlace::Function, &attrs);
+    }
+
+    fn set_loop_preload_candidate(
+        &self,
+        llfn: &'ll Value,
+        candidate: LoopPreloadCandidate,
+    ) {
+        let value = match candidate {
+            LoopPreloadCandidate::SnappyCopy12Slice => "snappy-copy12-slice",
+        };
+        let attr = llvm::CreateAttrStringValue(self.llcx, "rust.loop-preload", value);
+        attributes::apply_to_llfn(llfn, llvm::AttributePlace::Function, &[attr]);
     }
 
     fn declare_c_main(&self, fn_type: Self::Type) -> Option<Self::Function> {

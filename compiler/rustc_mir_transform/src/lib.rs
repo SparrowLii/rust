@@ -162,8 +162,10 @@ declare_passes! {
     mod lint_and_remove_uninhabited : LintAndRemoveUninhabited;
     mod lower_intrinsics : LowerIntrinsics;
     mod lower_slice_len : LowerSliceLenCalls;
+    mod loop_preload_marker : LoopPreloadMarker;
     mod match_branches : MatchBranchSimplification;
     mod mentioned_items : MentionedItems;
+    mod mul_to_shift : MulToShift;
     mod multiple_return_terminators : MultipleReturnTerminators;
     mod post_drop_elaboration : CheckLiveDrops;
     mod prettify : ReorderBasicBlocks, ReorderLocals;
@@ -759,6 +761,9 @@ pub(crate) fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'
             // to unreachable to eliminate the call to help later passes.
             // This invalidates CFG caches also.
             &o1(simplify_branches::SimplifyConstCondition::AfterInstSimplify),
+            // Record a tightly scoped backend optimization candidate before analyses below
+            // reuse the dominator cache.
+            &loop_preload_marker::LoopPreloadMarker,
             &ref_prop::ReferencePropagation,
             &sroa::ScalarReplacementOfAggregates,
             &simplify::SimplifyLocals::BeforeConstProp,
@@ -770,6 +775,9 @@ pub(crate) fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'
             &ssa_range_prop::SsaRangePropagation,
             &match_branches::MatchBranchSimplification,
             &dataflow_const_prop::DataflowConstProp,
+            // After const-prop, so multiplications by propagated constants are visible.
+            // Statement-only rewrite: does not touch the CFG.
+            &mul_to_shift::MulToShift,
             &single_use_consts::SingleUseConsts,
             &o1(simplify_branches::SimplifyConstCondition::AfterConstProp),
             &jump_threading::JumpThreading,

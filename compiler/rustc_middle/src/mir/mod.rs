@@ -201,6 +201,12 @@ pub enum MentionedItem<'tcx> {
     Closure(Ty<'tcx>),
 }
 
+/// A backend optimization candidate established by a MIR analysis pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, TyEncodable, TyDecodable, StableHash)]
+pub enum LoopPreloadCandidate {
+    SnappyCopy12Slice,
+}
+
 /// The lowered representation of a single function.
 #[derive(Clone, TyEncodable, TyDecodable, Debug, StableHash, TypeFoldable, TypeVisitable)]
 pub struct Body<'tcx> {
@@ -319,6 +325,10 @@ pub struct Body<'tcx> {
     #[type_visitable(ignore)]
     pub coverage_info_hi: Option<Box<coverage::CoverageInfoHi>>,
 
+    #[type_foldable(identity)]
+    #[type_visitable(ignore)]
+    pub loop_preload_candidate: Option<LoopPreloadCandidate>,
+
     /// Per-function coverage information added by the `InstrumentCoverage`
     /// pass, to be used in conjunction with the coverage statements injected
     /// into this body's blocks.
@@ -371,6 +381,7 @@ impl<'tcx> Body<'tcx> {
             tainted_by_errors,
             coverage_info_hi: None,
             function_coverage_info: None,
+            loop_preload_candidate: None,
         };
         body.is_polymorphic = body.has_non_region_param();
         body
@@ -402,6 +413,7 @@ impl<'tcx> Body<'tcx> {
             tainted_by_errors: None,
             coverage_info_hi: None,
             function_coverage_info: None,
+            loop_preload_candidate: None,
         };
         body.is_polymorphic = body.has_non_region_param();
         body

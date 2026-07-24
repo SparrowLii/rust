@@ -1,0 +1,83 @@
+// MIR for `same_name_wrong_shape` after LoopPreloadMarker
+
+fn same_name_wrong_shape(_1: &[u8]) -> u64 {
+    debug input => _1;
+    let mut _0: u64;
+    let mut _2: usize;
+    let _4: ();
+    let mut _5: ();
+    let mut _6: bool;
+    let mut _7: usize;
+    let mut _8: usize;
+    let mut _9: &[u8];
+    let mut _10: u64;
+    let mut _11: u8;
+    let _12: usize;
+    let mut _13: usize;
+    let mut _14: bool;
+    let mut _15: !;
+    let _16: ();
+    let mut _17: !;
+    scope 1 {
+        debug i => _2;
+        let mut _3: u64;
+        scope 2 {
+            debug sum => _3;
+        }
+    }
+
+    bb0: {
+        StorageLive(_2);
+        _2 = const 0_usize;
+        StorageLive(_3);
+        _3 = const 0_u64;
+        goto -> bb1;
+    }
+
+    bb1: {
+        StorageLive(_6);
+        StorageLive(_7);
+        _7 = copy _2;
+        StorageLive(_8);
+        StorageLive(_9);
+        _9 = copy _1;
+        _8 = PtrMetadata(move _9);
+        StorageDead(_9);
+        _6 = Lt(move _7, move _8);
+        switchInt(move _6) -> [0: bb4, otherwise: bb2];
+    }
+
+    bb2: {
+        StorageDead(_8);
+        StorageDead(_7);
+        StorageLive(_10);
+        StorageLive(_11);
+        StorageLive(_12);
+        _12 = copy _2;
+        _13 = PtrMetadata(copy _1);
+        _14 = Lt(copy _12, copy _13);
+        assert(move _14, "index out of bounds: the length is {} but the index is {}", move _13, copy _12) -> [success: bb3, unwind unreachable];
+    }
+
+    bb3: {
+        _11 = copy (*_1)[_12];
+        _10 = move _11 as u64 (IntToInt);
+        StorageDead(_11);
+        _3 = Add(copy _3, move _10);
+        StorageDead(_10);
+        StorageDead(_12);
+        _2 = Add(copy _2, const 1_usize);
+        StorageDead(_6);
+        goto -> bb1;
+    }
+
+    bb4: {
+        StorageDead(_8);
+        StorageDead(_7);
+        StorageDead(_6);
+        _0 = copy _3;
+        StorageDead(_3);
+        StorageDead(_2);
+        return;
+    }
+}
