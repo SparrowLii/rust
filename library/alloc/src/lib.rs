@@ -171,6 +171,10 @@
 #![feature(slice_iter_mut_as_mut_slice)]
 #![feature(slice_ptr_get)]
 #![feature(slice_range)]
+#![cfg_attr(
+    all(target_arch = "aarch64", target_feature = "sve"),
+    feature(stdarch_aarch64_sve)
+)]
 #![feature(std_internals)]
 #![feature(temporary_niche_types)]
 #![feature(titlecase)]

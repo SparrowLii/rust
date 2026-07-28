@@ -3312,18 +3312,7 @@ pub const trait Iterator {
         Self: Sized,
         F: FnMut(&Self::Item) -> B,
     {
-        #[inline]
-        fn key<T, B>(mut f: impl FnMut(&T) -> B) -> impl FnMut(T) -> (B, T) {
-            move |x| (f(&x), x)
-        }
-
-        #[inline]
-        fn compare<T, B: Ord>((x_p, _): &(B, T), (y_p, _): &(B, T)) -> Ordering {
-            x_p.cmp(y_p)
-        }
-
-        let (_, x) = self.map(key(f)).max_by(compare)?;
-        Some(x)
+        super::spec_max_by_key::SpecMaxByKey::spec_max_by_key(self, f)
     }
 
     /// Returns the element that gives the maximum value with respect to the

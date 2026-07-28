@@ -4,6 +4,7 @@ mod double_ended;
 mod exact_size;
 mod iterator;
 mod marker;
+mod spec_max_by_key;
 
 #[unstable(issue = "none", feature = "inplace_iteration")]
 pub use self::marker::InPlaceIterable;

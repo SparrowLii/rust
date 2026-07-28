@@ -170,6 +170,10 @@ use self::spec_extend::SpecExtend;
 #[cfg(not(no_global_oom_handling))]
 mod spec_extend;
 
+use self::spec_retain::SpecRetain;
+
+mod spec_retain;
+
 /// A contiguous growable array type, written as `Vec<T>`, short for 'vector'.
 ///
 /// # Examples
@@ -2511,7 +2515,14 @@ impl<T, A: Allocator> Vec<T, A> {
     /// assert_eq!(vec, [2, 3, 4]);
     /// ```
     #[stable(feature = "vec_retain_mut", since = "1.61.0")]
-    pub fn retain_mut<F>(&mut self, mut f: F)
+    pub fn retain_mut<F>(&mut self, f: F)
+    where
+        F: FnMut(&mut T) -> bool,
+    {
+        self.spec_retain_mut(f);
+    }
+
+    fn retain_mut_fallback<F>(&mut self, mut f: F)
     where
         F: FnMut(&mut T) -> bool,
     {

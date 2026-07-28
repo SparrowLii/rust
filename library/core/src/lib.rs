@@ -185,6 +185,10 @@
 #![feature(wasm_target_feature)]
 #![feature(x86_amx_intrinsics)]
 // tidy-alphabetical-end
+#![cfg_attr(
+    all(target_arch = "aarch64", target_feature = "sve"),
+    feature(stdarch_aarch64_sve)
+)]
 
 // allow using `core::` in intra-doc links
 #[allow(unused_extern_crates)]
