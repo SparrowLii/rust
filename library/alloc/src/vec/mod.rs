@@ -4132,7 +4132,7 @@ impl<T, A: Allocator> Vec<T, A> {
     // specific extend for `TrustedLen` iterators, called both by the specializations
     // and internal places where resolving specialization makes compilation slower
     #[cfg(not(no_global_oom_handling))]
-    fn extend_trusted(&mut self, iterator: impl iter::TrustedLen<Item = T>) {
+    fn extend_trustedextend_trusted(&mut self, iterator: impl iter::TrustedLen<Item = T>) {
         let (low, high) = iterator.size_hint();
         if let Some(additional) = high {
             debug_assert_eq!(
@@ -4143,10 +4143,15 @@ impl<T, A: Allocator> Vec<T, A> {
             );
             self.reserve(additional);
             unsafe {
-                let ptr = self.as_mut_ptr();
+                let mut ptr = self.as_mut_ptr().add(self.len);
                 let mut local_len = SetLenOnDrop::new(&mut self.len);
                 iterator.for_each(move |element| {
-                    ptr::write(ptr.add(local_len.current_len()), element);
+                    ptr::write(ptr, element);
+                    // Advancing the write pointer as its own induction
+                    // variable instead of re-deriving the address from the
+                    // length keeps it independent of the panic bookkeeping
+                    // below, which is what makes this loop vectorizable.
+                    ptr = ptr.add(1);
                     // Since the loop executes user code which can panic we have to update
                     // the length every step to correctly drop what we've written.
                     // NB can't overflow since we would have had to alloc the address space

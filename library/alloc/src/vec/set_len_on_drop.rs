@@ -20,6 +20,8 @@ impl<'a> SetLenOnDrop<'a> {
     }
 
     #[inline]
+    #[allow(dead_code)] // No longer called by the restructured extend_trusted
+                         // loop; kept for possible future internal callers.
     pub(super) fn current_len(&self) -> usize {
         self.local_len
     }
